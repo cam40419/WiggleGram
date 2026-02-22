@@ -1,3 +1,6 @@
 pillow
 numpy
 opencv-python
+matplotlib
+mediapipe
+ultralytics
