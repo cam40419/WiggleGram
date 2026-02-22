@@ -2,15 +2,57 @@ import os
 import logging
 from typing import List, Tuple, Optional, Literal
 
+import cv2
 import numpy as np
-import mediapipe as mp
 from PIL import Image, ImageOps, ImageFile
 
 from pathlib import Path
+from datetime import datetime
+import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parents[1]   # src/ -> repo root
-INPUT_DIR = REPO_ROOT / "input" / "ben/IMG_1638.JPG"
-OUTPUT_DIR = REPO_ROOT / "output" / "ben"
+COLOR_PROFILE_PATH = Path(__file__).resolve().parent / "color_profile.npz"
+
+
+def resolve_input_file() -> Path:
+    captured_files = sorted((REPO_ROOT / "input").glob("photo_*.jpg"))
+    if captured_files:
+        return captured_files[-1]
+    return REPO_ROOT / "input" / "ben" / "IMG_1638.JPG"
+
+# Capture photo on RPi and process it
+def capture_and_process():
+    
+    # Generate filename with current datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    input_file = REPO_ROOT / "input" / f"photo_{timestamp}.jpg"
+    output_dir = REPO_ROOT / "output" / timestamp
+    
+    # Create input directory if it doesn't exist
+    input_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Capture photo on RPi
+    try:
+        subprocess.run(
+            [
+                "rpicam-still",
+                "-o", str(input_file),
+                "--nopreview",
+                "--quality", "95",
+                "--autofocus-mode", "auto",
+            ],
+            check=True
+        )
+        logger.info(f"Photo captured: {input_file}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to capture photo: {e}")
+        return
+    
+    # Process the captured photo
+    main(str(input_file), str(output_dir))
+
+# INPUT_DIR = resolve_input_file()
+# OUTPUT_DIR = REPO_ROOT / "output" / "ben"
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 logger = logging.getLogger(__name__)
@@ -24,19 +66,21 @@ def main(raw_path: str, save_path: str):
     raw = Image.open(raw_path)
     pieces = split_grid(raw, 2, 2)
 
-    # Detect face bbox first, then run landmarker only on a small ROI
-    anchors = pick_nose_anchors_all_frames_face_first(
-        pieces,
-        detector_model_path="models/face_detector.tflite",
-        landmarker_model_path="face_landmarker.task",
-        detect_max_dim=320,
-        roi_max_dim=384,
-        roi_expand=0.25,
-        fail_mode="none",
-    )
+    pieces[0] = pieces[0].rotate(90, expand=True)
+    pieces[1] = pieces[1].rotate(90, expand=True)
+    pieces[2] = pieces[2].rotate(90, expand=True)
+    pieces[3] = pieces[3].rotate(90, expand=True)
+
+    #pieces = apply_npz_transforms(pieces, REPO_ROOT / "calibration_4cam.npz")
+
+    pieces = apply_color_correction(pieces)
 
     w, h = pieces[0].size
     target_xy = (w // 2, h // 2)
+
+    anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
+
+    save_anchor_debug(pieces, anchors, save_path)
 
     wigglegram_anchors(
         pieces,
@@ -47,6 +91,131 @@ def main(raw_path: str, save_path: str):
         duration_ms=100,
         crop_common=True,
     )
+
+
+def pick_anchors_template(
+    images: List[Image.Image],
+    *,
+    target_xy: Tuple[int, int],
+    template_fraction: float = 0.25,
+    min_score: float = 0.3,
+    ref_idx: int = 1,
+) -> List[Optional[Tuple[int, int]]]:
+    """Align frames by template-matching the center patch of frame ref_idx into all other frames.
+
+    This locks onto whatever foreground object is in the center of the reference frame
+    (e.g. a finger, face, or any close-up subject) rather than background texture.
+
+    ref_idx: which camera frame to use as the reference (default 1).
+    template_fraction: fraction of image width/height used for the template patch.
+    min_score: minimum normalised cross-correlation score to accept a match.
+    """
+    if not images:
+        return []
+
+    def to_gray(pil_im: Image.Image) -> np.ndarray:
+        return cv2.cvtColor(np.asarray(pil_im.convert("RGB")), cv2.COLOR_RGB2GRAY)
+
+    tx, ty = target_xy
+    ref_gray = to_gray(images[ref_idx])
+    h_ref, w_ref = ref_gray.shape
+
+    # Template patch: central region of reference frame
+    half_tw = int(w_ref * template_fraction / 2)
+    half_th = int(h_ref * template_fraction / 2)
+    tmpl = ref_gray[ty - half_th : ty + half_th, tx - half_tw : tx + half_tw]
+    logger.info("Template: %dx%d patch from center of frame %d", tmpl.shape[1], tmpl.shape[0], ref_idx)
+
+    anchors: List[Optional[Tuple[int, int]]] = []
+
+    for idx in range(len(images)):
+        if idx == ref_idx:
+            anchors.append((tx, ty))  # reference frame needs no shift
+            continue
+
+        gray = to_gray(images[idx])
+        result = cv2.matchTemplate(gray, tmpl, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        if max_val < min_score:
+            logger.warning("Template match score %.3f too low for frame %d (need %.2f), no shift",
+                           max_val, idx, min_score)
+            anchors.append(None)
+            continue
+
+        # max_loc is the top-left of the best match; centre it
+        found_cx = max_loc[0] + half_tw
+        found_cy = max_loc[1] + half_th
+        anchor = (found_cx, found_cy)
+        anchors.append(anchor)
+        logger.info("Template: frame %d match score=%.3f found_center=(%d,%d) shift=(%d,%d)",
+                    idx, max_val, found_cx, found_cy, tx - found_cx, ty - found_cy)
+
+    return anchors
+
+
+def apply_color_correction(images: List[Image.Image], profile_path: Path = COLOR_PROFILE_PATH) -> List[Image.Image]:
+    """Apply per-camera 3×3 colour-correction matrix loaded from *profile_path*.
+
+    The CCMs are produced by src/color_correct.py.  If the profile does not
+    exist the images are returned unchanged so the pipeline never hard-fails.
+    """
+    if not profile_path.exists():
+        logger.warning("Color profile not found: %s (skipping colour correction)", profile_path)
+        return images
+
+    data = np.load(str(profile_path))
+    ccms = data["ccms"]  # (4, 3, 3) float32
+
+    def srgb_to_linear(x: np.ndarray) -> np.ndarray:
+        x = x / 255.0
+        return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
+    def linear_to_srgb(x: np.ndarray) -> np.ndarray:
+        return np.where(x <= 0.0031308, x * 12.92, 1.055 * (x ** (1.0 / 2.4)) - 0.055)
+
+    corrected: List[Image.Image] = []
+    for idx, im in enumerate(images):
+        if idx >= len(ccms):
+            corrected.append(im)
+            continue
+        arr = np.asarray(im.convert("RGB")).astype(np.float32)
+        lin = srgb_to_linear(arr)               # (H, W, 3)
+        flat = lin.reshape(-1, 3)               # (N, 3)
+        flat_cc = flat @ ccms[idx].T            # apply CCM
+        flat_cc = np.clip(flat_cc, 0.0, 1.0)
+        out = linear_to_srgb(flat_cc.reshape(arr.shape))
+        out = np.clip(out * 255.0, 0, 255).astype(np.uint8)
+        corrected.append(Image.fromarray(out))
+        logger.info("Colour correction applied to camera %d", idx)
+
+    return corrected
+
+
+def apply_npz_transforms(images: List[Image.Image], npz_path: Path) -> List[Image.Image]:
+    if not npz_path.exists():
+        logger.warning("Calibration file not found: %s (skipping npz transforms)", npz_path)
+        return images
+
+    data = np.load(npz_path, allow_pickle=True)
+    Ks = np.asarray(data["Ks"], dtype=np.float64)
+    raw_dists = data["dists"]
+
+    transformed: List[Image.Image] = []
+    for idx, im in enumerate(images):
+        if idx >= len(Ks) or idx >= len(raw_dists):
+            transformed.append(im)
+            continue
+
+        dist = np.asarray(raw_dists[idx], dtype=np.float64).reshape(-1, 1)
+
+        rgb = np.asarray(im)
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        undistorted = cv2.undistort(bgr, Ks[idx], dist)
+        undistorted_rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+        transformed.append(Image.fromarray(undistorted_rgb))
+
+    return transformed
 
 
 # Image loading
@@ -90,218 +259,30 @@ def split_grid(img, rows, cols):
     return pieces
 
 
-# Fast face-first nose-anchor detection
-def pick_nose_anchors_all_frames_face_first(
+def save_anchor_debug(
     images: List[Image.Image],
-    *,
-    detector_model_path: str,
-    landmarker_model_path: str,
-    max_num_faces: int = 1,
-    # performance knobs (Pi-friendly):
-    detect_max_dim: int = 320,   # face bbox detection input max dimension
-    roi_max_dim: int = 384,      # landmarker ROI input max dimension
-    roi_expand: float = 0.25,    # bbox expansion fraction
-    min_face_confidence: float = 0.5,
-    fail_mode: Literal["raise", "previous", "center", "none"] = "none",
-) -> List[Optional[Tuple[int, int]]]:
-    if not images:
-        raise ValueError("No images provided")
-
-    # MediaPipe Tasks imports
-    BaseOptions = mp.tasks.BaseOptions
-    VisionRunningMode = mp.tasks.vision.RunningMode
-
-    FaceDetector = mp.tasks.vision.FaceDetector
-    FaceDetectorOptions = mp.tasks.vision.FaceDetectorOptions
-
-    FaceLandmarker = mp.tasks.vision.FaceLandmarker
-    FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
-
-    # Detector options
-    detector_options = FaceDetectorOptions(
-        base_options=BaseOptions(model_asset_path=detector_model_path),
-        running_mode=VisionRunningMode.IMAGE,
-        min_detection_confidence=min_face_confidence,
-    )
-
-    landmarker_options = FaceLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=landmarker_model_path),
-        running_mode=VisionRunningMode.IMAGE,
-        num_faces=max_num_faces,
-        output_face_blendshapes=False,
-    )
-
-    anchors: List[Optional[Tuple[int, int]]] = []
-    prev_anchor: Optional[Tuple[int, int]] = None
-    prev_bbox: Optional[Tuple[int, int, int, int]] = None  # x0,y0,x1,y1 in full-res
-
-    with FaceDetector.create_from_options(detector_options) as detector, \
-         FaceLandmarker.create_from_options(landmarker_options) as landmarker:
-
-        for idx, pil_im in enumerate(images):
-            w_full, h_full = pil_im.size
-
-            # Face bbox detect (downscaled)
-            scale_det = 1.0
-            if max(w_full, h_full) > detect_max_dim:
-                scale_det = detect_max_dim / float(max(w_full, h_full))
-                w_det = int(round(w_full * scale_det))
-                h_det = int(round(h_full * scale_det))
-                det_im = pil_im.resize((w_det, h_det), Image.Resampling.BILINEAR)
-            else:
-                det_im = pil_im
-                w_det, h_det = w_full, h_full
-
-            det_rgb = np.asarray(det_im)  # RGB
-            det_mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=det_rgb)
-            det_result = detector.detect(det_mp_image)
-
-            bbox_full: Optional[Tuple[int, int, int, int]] = None
-
-            # Take best detection (highest score)
-            if det_result.detections:
-                best = None
-                best_score = -1.0
-                for d in det_result.detections:
-                    score = float(d.categories[0].score) if d.categories else 0.0
-                    if score > best_score:
-                        best_score = score
-                        best = d
-
-                if best is not None and best.bounding_box is not None:
-                    bb = best.bounding_box  # in DET image pixels
-                    x0_det = bb.origin_x
-                    y0_det = bb.origin_y
-                    x1_det = bb.origin_x + bb.width
-                    y1_det = bb.origin_y + bb.height
-
-                    # Map bbox back to full-res
-                    if scale_det != 1.0:
-                        x0 = int(round(x0_det / scale_det))
-                        y0 = int(round(y0_det / scale_det))
-                        x1 = int(round(x1_det / scale_det))
-                        y1 = int(round(y1_det / scale_det))
-                    else:
-                        x0 = int(round(x0_det))
-                        y0 = int(round(y0_det))
-                        x1 = int(round(x1_det))
-                        y1 = int(round(y1_det))
-
-                    # Expand bbox a bit
-                    bw = x1 - x0
-                    bh = y1 - y0
-                    pad_x = int(round(bw * roi_expand))
-                    pad_y = int(round(bh * roi_expand))
-
-                    x0 = max(0, x0 - pad_x)
-                    y0 = max(0, y0 - pad_y)
-                    x1 = min(w_full, x1 + pad_x)
-                    y1 = min(h_full, y1 + pad_y)
-
-                    # sanity clamp
-                    if (x1 - x0) >= 2 and (y1 - y0) >= 2:
-                        bbox_full = (x0, y0, x1, y1)
-
-            # If detection failed, optionally reuse previous bbox
-            if bbox_full is None and prev_bbox is not None:
-                bbox_full = prev_bbox
-
-            # If still no bbox, decide behavior
-            if bbox_full is None:
-                # True "no transform" fallback
-                if fail_mode == "none":
-                    anchors.append(None)
-                    continue
-
-                msg = f"No face bbox detected in frame {idx+1}/{len(images)}"
-
-                if fail_mode == "raise":
-                    raise RuntimeError(msg)
-
-                if fail_mode == "previous" and prev_anchor is not None:
-                    anchors.append(prev_anchor)
-                    continue
-
-                if fail_mode == "center":
-                    center = (w_full // 2, h_full // 2)
-                    anchors.append(center)
-                    prev_anchor = center
-                    continue
-
-                # If previous requested but we don't have one yet, fall back to none.
-                anchors.append(None)
-                continue
-
-            prev_bbox = bbox_full
-
-            # Landmark nose on ROI (downscaled)
-            x0, y0, x1, y1 = bbox_full
-            roi = pil_im.crop((x0, y0, x1, y1))
-            roi_w, roi_h = roi.size
-
-            scale_roi = 1.0
-            if max(roi_w, roi_h) > roi_max_dim:
-                scale_roi = roi_max_dim / float(max(roi_w, roi_h))
-                rw = int(round(roi_w * scale_roi))
-                rh = int(round(roi_h * scale_roi))
-                roi_det = roi.resize((rw, rh), Image.Resampling.BILINEAR)
-            else:
-                roi_det = roi
-                rw, rh = roi_w, roi_h
-
-            roi_rgb = np.asarray(roi_det)
-            roi_mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=roi_rgb)
-            lm_result = landmarker.detect(roi_mp_image)
-
-            if not lm_result.face_landmarks:
-                if fail_mode == "none":
-                    anchors.append(None)
-                    continue
-
-                msg = f"No landmarks in ROI for frame {idx+1}/{len(images)}"
-
-                if fail_mode == "raise":
-                    raise RuntimeError(msg)
-
-                if fail_mode == "previous" and prev_anchor is not None:
-                    anchors.append(prev_anchor)
-                    continue
-
-                if fail_mode == "center":
-                    center = (w_full // 2, h_full // 2)
-                    anchors.append(center)
-                    prev_anchor = center
-                    continue
-
-                anchors.append(None)
-                continue
-
-            # Nose tip landmark index = 1 (normalized)
-            nose = lm_result.face_landmarks[0][1]
-            x_roi_det = nose.x * rw
-            y_roi_det = nose.y * rh
-
-            # Map to ROI full-res
-            if scale_roi != 1.0:
-                x_roi = x_roi_det / scale_roi
-                y_roi = y_roi_det / scale_roi
-            else:
-                x_roi = x_roi_det
-                y_roi = y_roi_det
-
-            # Map to full-res image
-            x_full = int(round(x0 + x_roi))
-            y_full = int(round(y0 + y_roi))
-
-            # Clamp
-            x_full = max(0, min(x_full, w_full - 1))
-            y_full = max(0, min(y_full, h_full - 1))
-
-            anchor = (x_full, y_full)
-            anchors.append(anchor)
-            prev_anchor = anchor
-
-    return anchors
+    anchors: List[Optional[Tuple[int, int]]],
+    save_dir: str,
+    cross_size: int = 40,
+    thickness: int = 6,
+):
+    """Save each frame with a large red X drawn at the detected anchor point."""
+    os.makedirs(save_dir, exist_ok=True)
+    for idx, (im, anchor) in enumerate(zip(images, anchors)):
+        arr = np.asarray(im.convert("RGB")).copy()
+        arr_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        if anchor is not None:
+            ax, ay = anchor
+            s = cross_size
+            cv2.line(arr_bgr, (ax - s, ay - s), (ax + s, ay + s), (255, 255, 255), thickness + 4)
+            cv2.line(arr_bgr, (ax + s, ay - s), (ax - s, ay + s), (255, 255, 255), thickness + 4)
+            cv2.line(arr_bgr, (ax - s, ay - s), (ax + s, ay + s), (0, 0, 255), thickness)
+            cv2.line(arr_bgr, (ax + s, ay - s), (ax - s, ay + s), (0, 0, 255), thickness)
+        else:
+            logger.warning("No anchor for cam%d — no marker drawn", idx)
+        out = Image.fromarray(cv2.cvtColor(arr_bgr, cv2.COLOR_BGR2RGB))
+        out.save(os.path.join(save_dir, f"debug_anchor_cam{idx}.jpg"), quality=90)
+    logger.info("Saved anchor debug images to %s", save_dir)
 
 
 # Wiggle creation using anchors
@@ -408,4 +389,5 @@ def crop_to_common_valid_area(frames: List[Image.Image], shifts: List[Tuple[int,
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    main(str(INPUT_DIR), str(OUTPUT_DIR))
+    capture_and_process()
+    #main(str(INPUT_DIR), str(OUTPUT_DIR))

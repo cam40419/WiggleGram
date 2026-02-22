@@ -1,7 +1,85 @@
 import os
 import glob
+import time
+import argparse
+import subprocess
+from datetime import datetime
+from pathlib import Path
 import numpy as np
 import cv2
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def split_grid(image, rows: int, cols: int):
+    h, w = image.shape[:2]
+    piece_w = w // cols
+    piece_h = h // rows
+
+    pieces = []
+    for row in range(rows):
+        for col in range(cols):
+            left = col * piece_w
+            top = row * piece_h
+            right = (col + 1) * piece_w
+            bottom = (row + 1) * piece_h
+            pieces.append(image[top:bottom, left:right])
+    return pieces
+
+
+def rotate_piece_for_camera(piece, cam_idx: int):
+    if cam_idx in (0, 1):
+        return cv2.rotate(piece, cv2.ROTATE_90_CLOCKWISE)
+    return cv2.rotate(piece, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+
+def capture_and_prepare_sets(
+    base_dir: str,
+    capture_count: int = 3,
+    capture_delay: float = 0.4,
+    capture_command: str = "rpicam-still",
+):
+    """Capture multi-cam composite frames, split/rotate into cam0..cam3 synced sets."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = REPO_ROOT / base_dir / timestamp
+    raw_dir = session_dir / "raw"
+    cam_dirs = [session_dir / f"cam{i}" for i in range(4)]
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    for cam_dir in cam_dirs:
+        cam_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx in range(capture_count):
+        input(f"Press Enter to capture image {idx + 1}/{capture_count}...")
+
+        frame_name = f"frame_{idx:02d}.jpg"
+        raw_path = raw_dir / frame_name
+        subprocess.run(
+            [capture_command, "-o", str(raw_path), "--nopreview"],
+            check=True,
+        )
+
+        frame = cv2.imread(str(raw_path), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError(f"Failed to read captured frame: {raw_path}")
+
+        pieces = split_grid(frame, 2, 2)
+        if len(pieces) != 4:
+            raise ValueError(f"Expected 4 split pieces, got {len(pieces)} for {raw_path}")
+
+        for cam_idx, piece in enumerate(pieces):
+            rotated = rotate_piece_for_camera(piece, cam_idx)
+            out_path = cam_dirs[cam_idx] / frame_name
+            ok = cv2.imwrite(str(out_path), rotated)
+            if not ok:
+                raise ValueError(f"Failed to write split frame: {out_path}")
+
+        if idx < capture_count - 1 and capture_delay > 0:
+            time.sleep(capture_delay)
+
+    print(f"Captured and prepared {capture_count} synced sets at: {session_dir}")
+    return str(session_dir)
 
 
 def list_synced_sets(base_dir: str):
@@ -109,6 +187,11 @@ def calibrate_four_cameras(
 
         used += 1
 
+    if used == 0:
+        raise ValueError(
+            "No valid synced sets where all 4 cameras detected chessboard corners."
+        )
+
     print(f"Using {used} synced sets for calibration.")
 
     # Calibrate each camera intrinsics independently
@@ -176,10 +259,43 @@ def calibrate_four_cameras(
     print(f"Saved calibration to: {output_npz}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Capture 4-camera calibration images, split/rotate, and calibrate."
+    )
+    parser.add_argument("--base-dir", default="calibration")
+    parser.add_argument("--pattern-cols", type=int, default=9)
+    parser.add_argument("--pattern-rows", type=int, default=6)
+    parser.add_argument("--square-size", type=float, default=19.0)
+    parser.add_argument("--output-npz", default="calibration_4cam.npz")
+    parser.add_argument("--capture-count", type=int, default=3)
+    parser.add_argument("--capture-delay", type=float, default=0.4)
+    parser.add_argument("--capture-command", default="rpicam-still")
+    parser.add_argument(
+        "--skip-capture",
+        action="store_true",
+        help="Skip capture/split step and calibrate from --base-dir directly.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
+    pattern_size = (args.pattern_cols, args.pattern_rows)
+
+    if args.skip_capture:
+        calibration_dir = str(REPO_ROOT / args.base_dir)
+    else:
+        calibration_dir = capture_and_prepare_sets(
+            base_dir=args.base_dir,
+            capture_count=args.capture_count,
+            capture_delay=args.capture_delay,
+            capture_command=args.capture_command,
+        )
+
     calibrate_four_cameras(
-        base_dir="calibration",
-        pattern_size=(9, 6),  # change to your board's inner corners
-        square_size=18.0,  # change to your square size (mm)
-        output_npz="calibration_4cam.npz",
+        base_dir=calibration_dir,
+        pattern_size=pattern_size,
+        square_size=args.square_size,
+        output_npz=args.output_npz,
     )
