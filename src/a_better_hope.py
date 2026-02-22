@@ -10,8 +10,9 @@ from pathlib import Path
 from datetime import datetime
 import subprocess
 
+from flash import trigger as flash_trigger
+
 REPO_ROOT = Path(__file__).resolve().parents[1]   # src/ -> repo root
-COLOR_PROFILE_PATH = Path(__file__).resolve().parent / "color_profile.npz"
 
 
 def resolve_input_file() -> Path:
@@ -33,6 +34,7 @@ def capture_and_process():
     
     # Capture photo on RPi
     try:
+        flash_trigger()
         subprocess.run(
             [
                 "rpicam-still",
