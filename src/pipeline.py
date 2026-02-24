@@ -261,7 +261,7 @@ def run_pipeline(raw_path: str, save_path: str, timestamp: str):
     pieces = split_grid(raw, 2, 2)
     pieces = [p.transpose(Image.Transpose.ROTATE_90) for p in pieces]
     pieces = apply_rotation_calibration(pieces)
-    # pieces = apply_white_balance(pieces)
+    pieces = apply_white_balance(pieces)
     # pieces = apply_color_correction(pieces)
 
     w, h      = pieces[0].size
