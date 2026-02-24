@@ -1,15 +1,18 @@
 import logging
 import queue
+import shutil
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 import tkinter as tk
 import tkinter.ttk as ttk
 import numpy as np
-from PIL import Image, ImageTk, ImageFile
+from PIL import Image, ImageTk, ImageFile, ImageDraw, ImageFont
 
-from camera import do_capture
+import config as cfg
+from camera import do_capture, SHUTTER_US
 from gif_utils import load_gif_frames
 from pipeline import run_pipeline
 from viewfinder import MJPEGReader
@@ -162,7 +165,9 @@ class WiggleApp:
                 frame = self._frame_queue.get_nowait()
                 cam1  = self._extract_cam1(frame)
                 self._last_vf_frame = cam1
-                self._show_pil(self._draw_crosshair(cam1))
+                cam1 = self._draw_crosshair(cam1)
+                cam1 = self._draw_camera_info(cam1)
+                self._show_pil(cam1)
             except queue.Empty:
                 pass  # no new frame yet
         self.root.after(33, self._poll_viewfinder)
@@ -188,6 +193,80 @@ class WiggleApp:
         vline(cx, cy - L, cy - g)   # top arm
         vline(cx, cy + g, cy + L)   # bottom arm
         return Image.fromarray(arr)
+
+    # Draw DSLR-style camera info overlay
+    def _draw_camera_info(self, img: Image.Image) -> Image.Image:
+        """Draw camera settings and stats overlay like a DSLR viewfinder."""
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        
+        # Try to load a font, fall back to default if unavailable
+        try:
+            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
+            font_med = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        except:
+            font_large = ImageFont.load_default()
+            font_med = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+        
+        # Helper to draw text with shadow
+        def draw_text_shadow(xy, text, font, fill=(255, 255, 255)):
+            x, y = xy
+            # Shadow
+            draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0))
+            # Main text
+            draw.text((x, y), text, font=font, fill=fill)
+        
+        # Top-left: Mode
+        draw_text_shadow((20, 20), "WIGGLEGRAM", font_large, fill=(255, 200, 0))
+        
+        # Top-right: Time and storage
+        current_time = datetime.now().strftime("%H:%M:%S")
+        try:
+            disk = shutil.disk_usage(cfg.OUTPUT_DIR)
+            gb_free = disk.free / (1024**3)
+            storage_text = f"{gb_free:.1f}GB"
+        except:
+            storage_text = "--GB"
+        
+        time_text = f"{current_time}  {storage_text}"
+        bbox = draw.textbbox((0, 0), time_text, font=font_med)
+        text_w = bbox[2] - bbox[0]
+        draw_text_shadow((w - text_w - 20, 20), time_text, font_med)
+        
+        # Bottom-left: Camera settings
+        shutter_speed = SHUTTER_US / 1_000_000  # Convert to seconds
+        if shutter_speed >= 1:
+            shutter_text = f"{shutter_speed:.1f}s"
+        else:
+            shutter_text = f"1/{int(1/shutter_speed)}"
+        
+        settings_lines = [
+            f"SS: {shutter_text}",
+            f"EV: +0.5",
+            f"AWB: Auto",
+        ]
+        
+        y_offset = h - 20 - (len(settings_lines) * 28)
+        for line in settings_lines:
+            draw_text_shadow((20, y_offset), line, font_small)
+            y_offset += 28
+        
+        # Bottom-right: Resolution and FPS
+        info_lines = [
+            f"{VF_WIDTH}×{VF_HEIGHT}",
+            f"{VF_FPS} FPS",
+        ]
+        
+        y_offset = h - 20 - (len(info_lines) * 28)
+        for line in info_lines:
+            bbox = draw.textbbox((0, 0), line, font=font_small)
+            text_w = bbox[2] - bbox[0]
+            draw_text_shadow((w - text_w - 20, y_offset), line, font_small)
+            y_offset += 28
+        
+        return img
 
     # Scale a PIL image to fit the screen and push to canvas
     def _show_pil(self, img: Image.Image):
