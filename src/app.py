@@ -109,6 +109,9 @@ class WiggleApp:
         # hidden until processing starts
         self._progress.pack(side="top", padx=20, pady=(2, 4))
         self._progress.pack_forget()
+        
+        # Hide status bar initially (viewfinder mode)
+        self._bar_frame.place_forget()
 
         # Image item on canvas
         self._canvas_img_id = self.canvas.create_image(
@@ -317,6 +320,13 @@ class WiggleApp:
     def _start_capture(self):
         self.state = self.STATE_CAPTURING
         self.status_var.set("Capturing…")
+        
+        # Show status bar during capture
+        PROGRESS_H = 48
+        self._bar_frame.place(
+            x=0, y=self.screen_h - PROGRESS_H,
+            width=self.screen_w, height=PROGRESS_H
+        )
 
         # Stop the MJPEG viewfinder to free the camera
         self._mjpeg.stop()
@@ -456,6 +466,9 @@ class WiggleApp:
         # Ensure progress bar is stopped and hidden
         self._progress.stop()
         self._progress.pack_forget()
+        
+        # Hide status bar in viewfinder mode
+        self._bar_frame.place_forget()
 
         self.state = self.STATE_VIEWFINDER
         self.status_var.set("Ready")
