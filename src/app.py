@@ -118,6 +118,17 @@ class WiggleApp:
             self.screen_w // 2, self.screen_h // 2, anchor="center"
         )
         self._current_tk_img: Optional[ImageTk.PhotoImage] = None
+        
+        # Cache fonts for overlay performance
+        self._fonts_loaded = False
+        self._font_large = None
+        self._font_med = None
+        self._font_small = None
+        self._load_fonts()
+        
+        # Cache disk usage (update every 60 frames)
+        self._disk_usage_cache = "--GB"
+        self._disk_usage_counter = 0
 
         # Viewfinder
         self._frame_queue: queue.Queue = queue.Queue(maxsize=2)
@@ -145,8 +156,32 @@ class WiggleApp:
         root.bind("<Escape>", lambda _e: self._quit())
 
         # Start viewfinder poll
-        self._poll_viewfinder()
-
+        self._poll_viewfinder()    
+    def _load_fonts(self):
+        """Load fonts once at startup for better performance."""
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+        
+        for font_path in font_paths:
+            try:
+                self._font_large = ImageFont.truetype(font_path, 40)
+                self._font_med = ImageFont.truetype(font_path, 28)
+                self._font_small = ImageFont.truetype(font_path, 24)
+                self._fonts_loaded = True
+                logger.info(f"Loaded fonts from: {font_path}")
+                return
+            except:
+                continue
+        
+        # Fallback to default
+        self._font_large = ImageFont.load_default()
+        self._font_med = ImageFont.load_default()
+        self._font_small = ImageFont.load_default()
+        logger.warning("Using default bitmap font")
     # GPIO callback (runs in GPIO thread – must be thread-safe)
     def _gpio_shutter_cb(self, channel):
         self.root.after(0, self._shutter_pressed)
@@ -177,131 +212,92 @@ class WiggleApp:
                 frame = self._frame_queue.get_nowait()
                 cam1  = self._extract_cam1(frame)
                 self._last_vf_frame = cam1
-                cam1 = self._draw_crosshair(cam1)
-                cam1 = self._draw_camera_info(cam1)
+                # Combine drawing operations on single mutable image
+                cam1 = self._draw_all_overlays(cam1)
                 self._show_pil(cam1)
             except queue.Empty:
                 pass  # no new frame yet
         self.root.after(33, self._poll_viewfinder)
 
-    # Draw a crosshair with gap in the center
-    def _draw_crosshair(self, img: Image.Image) -> Image.Image:
+    # Combined drawing operation for better performance
+    def _draw_all_overlays(self, img: Image.Image) -> Image.Image:
+        """Draw crosshair and camera info in single pass for performance."""
+        # Convert to numpy for crosshair, then to PIL for text (single conversion)
         arr = np.asarray(img).copy()
-        cx, cy = arr.shape[1] // 2, arr.shape[0] // 2
+        w, h = arr.shape[1], arr.shape[0]
+        
+        # Draw crosshair directly on numpy array
+        cx, cy = w // 2, h // 2
         g = CROSSHAIR_GAP
         L = CROSSHAIR_LEN
-        t = 2  # thickness
-
-        def hline(y, x0, x1):
-            arr[y - t:y + t, x0:x1] = CROSSHAIR_SHD
-            arr[y - t + 1:y + t - 1, x0 + 1:x1 - 1] = CROSSHAIR_CLR
-
-        def vline(x, y0, y1):
-            arr[y0:y1, x - t:x + t] = CROSSHAIR_SHD
-            arr[y0 + 1:y1 - 1, x - t + 1:x + t - 1] = CROSSHAIR_CLR
-
-        hline(cy, cx - L, cx - g)   # left arm
-        hline(cy, cx + g, cx + L)   # right arm
-        vline(cx, cy - L, cy - g)   # top arm
-        vline(cx, cy + g, cy + L)   # bottom arm
-        return Image.fromarray(arr)
-
-    # Draw DSLR-style camera info overlay
-    def _draw_camera_info(self, img: Image.Image) -> Image.Image:
-        """Draw camera settings and stats overlay like a DSLR viewfinder."""
-        # Ensure we have a mutable RGB image
-        img = img.convert("RGB").copy()
+        t = 2
+        
+        # Horizontal lines
+        arr[cy - t:cy + t, cx - L:cx - g] = CROSSHAIR_SHD
+        arr[cy - t + 1:cy + t - 1, cx - L + 1:cx - g - 1] = CROSSHAIR_CLR
+        arr[cy - t:cy + t, cx + g:cx + L] = CROSSHAIR_SHD
+        arr[cy - t + 1:cy + t - 1, cx + g + 1:cx + L - 1] = CROSSHAIR_CLR
+        
+        # Vertical lines
+        arr[cy - L:cy - g, cx - t:cx + t] = CROSSHAIR_SHD
+        arr[cy - L + 1:cy - g - 1, cx - t + 1:cx + t - 1] = CROSSHAIR_CLR
+        arr[cy + g:cy + L, cx - t:cx + t] = CROSSHAIR_SHD
+        arr[cy + g + 1:cy + L - 1, cx - t + 1:cx + t - 1] = CROSSHAIR_CLR
+        
+        # Convert to PIL for text overlay
+        img = Image.fromarray(arr)
         draw = ImageDraw.Draw(img)
-        w, h = img.size
-        logger.debug(f"Drawing camera info overlay on {w}x{h} image")
         
-        # Try to load fonts with multiple fallback paths
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        ]
-        
-        font_large = None
-        font_med = None
-        font_small = None
-        
-        for font_path in font_paths:
-            try:
-                font_large = ImageFont.truetype(font_path, 40)
-                font_med = ImageFont.truetype(font_path, 28)
-                font_small = ImageFont.truetype(font_path, 24)
-                logger.debug(f"Loaded font: {font_path}")
-                break
-            except:
-                continue
-        
-        # Final fallback to default
-        if font_large is None:
-            font_large = ImageFont.load_default()
-            font_med = ImageFont.load_default()
-            font_small = ImageFont.load_default()
-            logger.warning("Using default bitmap font - text may be small")
-        
-        # Helper to draw text with shadow
+        # Optimized text shadow (only 2 offsets instead of 24)
         def draw_text_shadow(xy, text, font, fill=(255, 255, 255)):
             x, y = xy
-            # Shadow (thick black outline for visibility)
-            for dx in [-2, -1, 0, 1, 2]:
-                for dy in [-2, -1, 0, 1, 2]:
-                    if dx != 0 or dy != 0:
-                        draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
-            # Main text
+            # Simple shadow: 2 passes instead of 25
+            draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0))
+            draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0))
             draw.text((x, y), text, font=font, fill=fill)
         
-        # Top-left: Mode (bright yellow/orange for visibility)
-        draw_text_shadow((20, 20), "WIGGLEGRAM", font_large, fill=(255, 200, 0))
+        # Top-left: Mode
+        draw_text_shadow((20, 20), "WIGGLEGRAM", self._font_large, fill=(255, 200, 0))
+        
+        # Update disk usage cache every 60 frames (~4 seconds at 15fps)
+        self._disk_usage_counter += 1
+        if self._disk_usage_counter >= 60:
+            self._disk_usage_counter = 0
+            try:
+                disk = shutil.disk_usage(cfg.OUTPUT_DIR)
+                gb_free = disk.free / (1024**3)
+                self._disk_usage_cache = f"{gb_free:.1f}GB"
+            except:
+                self._disk_usage_cache = "--GB"
         
         # Top-right: Time and storage
         current_time = datetime.now().strftime("%H:%M:%S")
-        try:
-            disk = shutil.disk_usage(cfg.OUTPUT_DIR)
-            gb_free = disk.free / (1024**3)
-            storage_text = f"{gb_free:.1f}GB"
-        except:
-            storage_text = "--GB"
-        
-        time_text = f"{current_time}  {storage_text}"
-        bbox = draw.textbbox((0, 0), time_text, font=font_med)
+        time_text = f"{current_time}  {self._disk_usage_cache}"
+        bbox = draw.textbbox((0, 0), time_text, font=self._font_med)
         text_w = bbox[2] - bbox[0]
-        draw_text_shadow((w - text_w - 20, 20), time_text, font_med)
+        draw_text_shadow((w - text_w - 20, 20), time_text, self._font_med)
         
         # Bottom-left: Camera settings
-        shutter_speed = SHUTTER_US / 1_000_000  # Convert to seconds
-        if shutter_speed >= 1:
-            shutter_text = f"{shutter_speed:.1f}s"
-        else:
-            shutter_text = f"1/{int(1/shutter_speed)}"
+        shutter_speed = SHUTTER_US / 1_000_000
+        shutter_text = f"{shutter_speed:.1f}s" if shutter_speed >= 1 else f"1/{int(1/shutter_speed)}"
         
-        settings_lines = [
-            f"SS: {shutter_text}",
-            f"EV: +0.5",
-            f"AWB: Auto",
-        ]
-        
-        y_offset = h - 20 - (len(settings_lines) * 28)
-        for line in settings_lines:
-            draw_text_shadow((20, y_offset), line, font_small)
-            y_offset += 28
+        y_offset = h - 104  # Pre-calculated offset for 3 lines
+        draw_text_shadow((20, y_offset), f"SS: {shutter_text}", self._font_small)
+        draw_text_shadow((20, y_offset + 28), "EV: +0.5", self._font_small)
+        draw_text_shadow((20, y_offset + 56), "AWB: Auto", self._font_small)
         
         # Bottom-right: Resolution and FPS
-        info_lines = [
-            f"{VF_WIDTH}×{VF_HEIGHT}",
-            f"{VF_FPS} FPS",
-        ]
+        y_offset = h - 76  # Pre-calculated offset for 2 lines
+        res_text = f"{VF_WIDTH}×{VF_HEIGHT}"
+        fps_text = f"{VF_FPS} FPS"
         
-        y_offset = h - 20 - (len(info_lines) * 28)
-        for line in info_lines:
-            bbox = draw.textbbox((0, 0), line, font=font_small)
-            text_w = bbox[2] - bbox[0]
-            draw_text_shadow((w - text_w - 20, y_offset), line, font_small)
-            y_offset += 28
+        bbox = draw.textbbox((0, 0), res_text, font=self._font_small)
+        text_w = bbox[2] - bbox[0]
+        draw_text_shadow((w - text_w - 20, y_offset), res_text, self._font_small)
+        
+        bbox = draw.textbbox((0, 0), fps_text, font=self._font_small)
+        text_w = bbox[2] - bbox[0]
+        draw_text_shadow((w - text_w - 20, y_offset + 28), fps_text, self._font_small)
         
         return img
 
@@ -311,7 +307,8 @@ class WiggleApp:
         img_w, img_h = img.size
         scale = min(sw / img_w, sh / img_h)
         new_w, new_h = int(img_w * scale), int(img_h * scale)
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        # Use BILINEAR for faster rendering (LANCZOS is slower but higher quality)
+        img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
         tk_img = ImageTk.PhotoImage(img)
         self.canvas.itemconfig(self._canvas_img_id, image=tk_img)
         self._current_tk_img = tk_img   # prevent GC
@@ -332,7 +329,7 @@ class WiggleApp:
         self._mjpeg.stop()
         # Show last frozen frame while camera re-initialises
         if self._last_vf_frame:
-            self._show_pil(self._draw_crosshair(self._last_vf_frame))
+            self._show_pil(self._draw_all_overlays(self._last_vf_frame))
 
         def capture_thread():
             input_file, output_dir = do_capture()
