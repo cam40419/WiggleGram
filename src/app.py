@@ -294,7 +294,7 @@ class WiggleApp:
         self._progress.pack_forget()
 
         self.state = self.STATE_GIF
-        self.status_var.set("Done! Press shutter for next shot.")
+        self.status_var.set("Done! Press shutter for next shot!")
 
         frames, durations = load_gif_frames(gif_path)
         if not frames:
