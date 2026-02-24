@@ -1,5 +1,3 @@
-"""Main WiggleGram application."""
-
 import logging
 import queue
 import threading
@@ -42,12 +40,10 @@ try:
     logger.info("GPIO ready on BCM%d", SHUTTER_PIN)
 except ImportError:
     _GPIO_AVAILABLE = False
-    logger.warning("RPi.GPIO not available – keyboard spacebar will act as shutter")
+    logger.warning("RPi.GPIO not available - keyboard spacebar will act as shutter")
 
 
 class WiggleApp:
-    """Main application class for WiggleGram."""
-
     STATE_VIEWFINDER = "viewfinder"
     STATE_CAPTURING  = "capturing"
     STATE_PROCESSING = "processing"
@@ -57,7 +53,7 @@ class WiggleApp:
         self.root  = root
         self.state = self.STATE_VIEWFINDER
 
-        # ── Window setup ──────────────────────────────────────────────────────
+        # Window setup
         root.title("Wigglegram")
         root.configure(bg="black")
         root.attributes("-fullscreen", True)
@@ -65,14 +61,14 @@ class WiggleApp:
         self.screen_w = root.winfo_screenwidth()
         self.screen_h = root.winfo_screenheight()
 
-        # ── Canvas ────────────────────────────────────────────────────────────
+        # Canvas
         self.canvas = tk.Canvas(
             root, width=self.screen_w, height=self.screen_h,
             bg="black", highlightthickness=0
         )
         self.canvas.pack(fill="both", expand=True)
 
-        # ── Bottom bar: status label + progress bar ─────────────────────────
+        # Bottom bar: status label + progress bar
         PROGRESS_H = 48
         self._bar_frame = tk.Frame(root, bg="black", height=PROGRESS_H)
         self._bar_frame.place(
@@ -108,19 +104,19 @@ class WiggleApp:
         )
         self._current_tk_img: Optional[ImageTk.PhotoImage] = None
 
-        # ── Viewfinder ────────────────────────────────────────────────────────
+        # Viewfinder
         self._frame_queue: queue.Queue = queue.Queue(maxsize=2)
         self._mjpeg = MJPEGReader(self._frame_queue, width=VF_WIDTH, height=VF_HEIGHT, fps=VF_FPS)
         self._mjpeg.start()
         self._last_vf_frame: Optional[Image.Image] = None
 
-        # ── GIF playback state ────────────────────────────────────────────────
+        # GIF playback state
         self._gif_frames:    List[ImageTk.PhotoImage] = []
         self._gif_durations: List[int] = []
         self._gif_idx:       int = 0
         self._gif_after_id:  Optional[str] = None
 
-        # ── GPIO interrupt ────────────────────────────────────────────────────
+        # GPIO interrupt
         if _GPIO_AVAILABLE:
             GPIO.add_event_detect(
                 SHUTTER_PIN, GPIO.FALLING,
@@ -133,21 +129,21 @@ class WiggleApp:
 
         root.bind("<Escape>", lambda _e: self._quit())
 
-        # ── Start viewfinder poll ─────────────────────────────────────────────
+        # Start viewfinder poll
         self._poll_viewfinder()
 
-    # ── GPIO callback (runs in GPIO thread – must be thread-safe) ─────────────
+    # GPIO callback (runs in GPIO thread – must be thread-safe)
     def _gpio_shutter_cb(self, channel):
         self.root.after(0, self._shutter_pressed)
 
-    # ── Shutter logic ─────────────────────────────────────────────────────────
+    # Shutter logic
     def _shutter_pressed(self):
         if self.state == self.STATE_VIEWFINDER:
             self._start_capture()
         elif self.state == self.STATE_GIF:
             self._return_to_viewfinder()
 
-    # ── Extract camera 1 (top-right quadrant, rotated 90°) ───────────────────
+    # Extract camera 1 (top-right quadrant, rotated 90°)
     @staticmethod
     def _extract_cam1(frame: Image.Image) -> Image.Image:
         """Crop the top-right quadrant of the 2×2 grid and rotate 90° CW."""
@@ -159,7 +155,7 @@ class WiggleApp:
         lower = h // 2
         return frame.crop((left, upper, right, lower)).rotate(90, expand=True)
 
-    # ── Viewfinder poll (runs every 33 ms on tkinter main thread) ─────────────
+    # Viewfinder poll (runs every 33 ms on tkinter main thread)
     def _poll_viewfinder(self):
         if self.state == self.STATE_VIEWFINDER:
             try:
@@ -171,7 +167,7 @@ class WiggleApp:
                 pass  # no new frame yet
         self.root.after(33, self._poll_viewfinder)
 
-    # ── Draw a crosshair with gap in the centre ────────────────────────────────
+    # Draw a crosshair with gap in the center
     def _draw_crosshair(self, img: Image.Image) -> Image.Image:
         arr = np.asarray(img).copy()
         cx, cy = arr.shape[1] // 2, arr.shape[0] // 2
@@ -193,7 +189,7 @@ class WiggleApp:
         vline(cx, cy + g, cy + L)   # bottom arm
         return Image.fromarray(arr)
 
-    # ── Scale a PIL image to fit the screen and push to canvas ────────────────
+    # Scale a PIL image to fit the screen and push to canvas
     def _show_pil(self, img: Image.Image):
         sw, sh = self.screen_w, self.screen_h
         img_w, img_h = img.size
@@ -204,7 +200,7 @@ class WiggleApp:
         self.canvas.itemconfig(self._canvas_img_id, image=tk_img)
         self._current_tk_img = tk_img   # prevent GC
 
-    # ── Start capture sequence ────────────────────────────────────────────────
+    # Start capture sequence
     def _start_capture(self):
         self.state = self.STATE_CAPTURING
         self.status_var.set("Capturing…")
@@ -224,7 +220,7 @@ class WiggleApp:
 
         threading.Thread(target=capture_thread, daemon=True).start()
 
-    # ── Build 4-up composite from raw 2×2 capture ──────────────────────────
+    # Build 4-up composite from raw 2×2 capture
     @staticmethod
     def _build_4up(raw: Image.Image, target_w: int, target_h: int) -> Image.Image:
         """Split the 2x2 grid, rotate each 90° CW, lay them out side-by-side."""
@@ -250,7 +246,7 @@ class WiggleApp:
             composite.paste(piece, (x, y))
         return composite
 
-    # ── Start processing ──────────────────────────────────────────────────────
+    # Start processing
     def _start_processing(self, input_file: Path, output_dir: Path):
         self.state = self.STATE_PROCESSING
         self.status_var.set("Processing…")
@@ -282,7 +278,7 @@ class WiggleApp:
 
         threading.Thread(target=process_thread, daemon=True).start()
 
-    # ── GIF playback ──────────────────────────────────────────────────────────
+    # GIF playback
     def _show_gif(self, gif_path: Path):
         if not gif_path.exists():
             logger.error("GIF not found: %s", gif_path)
@@ -336,7 +332,7 @@ class WiggleApp:
         dur = self._gif_durations[idx] if self._gif_durations else 100
         self._gif_after_id = self.root.after(dur, self._animate_gif)
 
-    # ── Return to viewfinder ──────────────────────────────────────────────────
+    # Return to viewfinder
     def _return_to_viewfinder(self):
         # Cancel GIF animation
         if self._gif_after_id:
@@ -356,17 +352,14 @@ class WiggleApp:
         self._mjpeg = MJPEGReader(self._frame_queue, width=VF_WIDTH, height=VF_HEIGHT, fps=VF_FPS)
         self._mjpeg.start()
 
-    # ── Clean shutdown ────────────────────────────────────────────────────────
+    # Clean shutdown
     def _quit(self):
         self._mjpeg.stop()
         if _GPIO_AVAILABLE:
             GPIO.cleanup()
         self.root.destroy()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Main entry point
-# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     root = tk.Tk()
     app  = WiggleApp(root)

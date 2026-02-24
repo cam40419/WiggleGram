@@ -41,7 +41,7 @@ def apply_rotation_calibration(images: List[Image.Image]) -> List[Image.Image]:
             corrected.append(im)
         else:
             corrected.append(im.rotate(
-                float(angles[idx]),
+                float(angles[idx] + 90),
                 resample=Image.Resampling.BICUBIC,
                 expand=False,
             ))
@@ -259,10 +259,11 @@ def run_pipeline(raw_path: str, save_path: str, timestamp: str):
     """Full wigglegram processing pipeline."""
     raw    = Image.open(raw_path)
     pieces = split_grid(raw, 2, 2)
-    pieces = [p.rotate(90, expand=True) for p in pieces]
-    # pieces = apply_rotation_calibration(pieces)
+    
+    # Now includes 90 degree rotation
+    pieces = apply_rotation_calibration(pieces)
     # pieces = apply_white_balance(pieces)
-    pieces = apply_color_correction(pieces)
+    # pieces = apply_color_correction(pieces)
 
     w, h      = pieces[0].size
     target_xy = (w // 2, h // 2)
