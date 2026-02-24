@@ -1,31 +1,3 @@
-"""
-Color Calibration Script
-========================
-Point all four cameras at a Macbeth ColorChecker Classic chart displayed on a
-monitor (see URL below), capture an image, then run this script.  For each
-camera you will be asked to click the four **outer corners** of the chart
-(top-left → top-right → bottom-right → bottom-left).  A 3×3 colour-correction
-matrix (CCM) is fitted per camera and the profile is saved to:
-
-    src/color_profile.npz
-
-Color calibration target URL
------------------------------
-Open the following URL in a full-screen browser window, then point the cameras
-at the screen so the chart fills as much of the frame as possible:
-
-    https://www.colour-checker-detection.readthedocs.io/en/develop/_images/ColorChecker24_After_Nov2014.png
-
-or view it directly at full resolution:
-
-    https://upload.wikimedia.org/wikipedia/commons/8/8c/X-Rite_ColorChecker_Passport.jpg
-
-Usage
------
-    python3 src/color_correct.py                  # capture a new photo via rpicam-still
-    python3 src/color_correct.py path/to/img.jpg  # use an existing combined 2×2 image
-"""
-
 from __future__ import annotations
 
 import sys
@@ -73,13 +45,9 @@ COLORCHECKER_REFERENCE_SRGB = np.array([
 
 N_ROWS = 4
 N_COLS = 6
-N_PATCHES = N_ROWS * N_COLS  # 24
+N_PATCHES = N_ROWS * N_COLS
 
-
-# ---------------------------------------------------------------------------
 # Image helpers (mirror the pipeline in a_better_hope.py)
-# ---------------------------------------------------------------------------
-
 def capture_image() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = REPO_ROOT / "input" / f"calibration_{timestamp}.jpg"
@@ -94,7 +62,7 @@ def capture_image() -> Path:
 
 
 def split_and_rotate(raw: Image.Image) -> list[Image.Image]:
-    """Split 2×2 grid and rotate 90° CW — same as a_better_hope.py."""
+    """Split 2x2 grid and rotate 90° CW — same as a_better_hope.py."""
     w, h = raw.size
     pw, ph = w // 2, h // 2
     pieces = []
@@ -104,11 +72,7 @@ def split_and_rotate(raw: Image.Image) -> list[Image.Image]:
             pieces.append(crop.rotate(90, expand=True))
     return pieces
 
-
-# ---------------------------------------------------------------------------
 # Interactive corner selection
-# ---------------------------------------------------------------------------
-
 def pick_corners(image_rgb: np.ndarray, cam_idx: int) -> np.ndarray:
     """Show the image and ask the user to click 4 corners of the chart.
 
@@ -157,10 +121,7 @@ def pick_corners(image_rgb: np.ndarray, cam_idx: int) -> np.ndarray:
     return np.array(corners, dtype=np.float32)
 
 
-# ---------------------------------------------------------------------------
 # Patch extraction via perspective warp
-# ---------------------------------------------------------------------------
-
 def extract_patches(image_rgb: np.ndarray, corners: np.ndarray) -> np.ndarray:
     """Warp the chart region to a canonical rectangle and sample patch centres.
 

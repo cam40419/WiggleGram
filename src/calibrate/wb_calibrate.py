@@ -1,34 +1,3 @@
-"""
-White Balance / Flat-Field Calibration Script
-==============================================
-Point all four cameras at a plain **white piece of paper** filling the entire
-frame, then run this script.
-
-Instead of a single per-channel scalar, this script computes a spatially-
-varying per-pixel gain map for every camera.  This corrects:
-  - Global colour balance (pink / blue overall cast)
-  - Spatial vignetting (colour shifts that vary across the frame)
-
-How it works
-------------
-1. The white-paper image is converted to linear light.
-2. Each channel is smoothed with a large Gaussian — this models the sensor's
-   underlying spatial response surface, ignoring noise.
-3. Per-pixel gain  =  global_target / smoothed_response
-   where global_target = mean luminance across all pixels and channels.
-4. The gain map is stored downsampled at 1/8 resolution.  It is upsampled
-   back to full resolution (bilinear) when applied in a_better_hope.py.
-
-Profile saved to:
-
-    src/white_balance/wb_profile.npz  (key: "gain_maps", shape 4×H×W×3)
-
-Usage
------
-    python3 src/wb_calibrate.py                   # capture via rpicam-still
-    python3 src/wb_calibrate.py path/to/img.jpg   # use an existing combined 2×2 image
-"""
-
 from __future__ import annotations
 
 import sys
@@ -58,10 +27,7 @@ GAIN_MIN = 0.25
 GAIN_MAX = 4.0
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
 def srgb_to_linear(x: np.ndarray) -> np.ndarray:
     x = np.clip(x / 255.0, 0.0, 1.0)
     return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
@@ -72,10 +38,7 @@ def linear_to_srgb(x: np.ndarray) -> np.ndarray:
     return np.where(x <= 0.0031308, x * 12.92, 1.055 * (x ** (1.0 / 2.4)) - 0.055)
 
 
-# ---------------------------------------------------------------------------
 # Capture / split
-# ---------------------------------------------------------------------------
-
 def capture_image() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out = REPO_ROOT / "input" / f"wb_calibration_{timestamp}.jpg"
@@ -110,10 +73,7 @@ def split_and_rotate(raw: Image.Image) -> list[Image.Image]:
     return pieces
 
 
-# ---------------------------------------------------------------------------
 # Spatial gain map computation
-# ---------------------------------------------------------------------------
-
 def compute_gain_map(image_rgb: np.ndarray) -> np.ndarray:
     """Compute a spatially-varying per-channel gain map from a white-paper frame.
 
@@ -161,10 +121,7 @@ def compute_gain_map(image_rgb: np.ndarray) -> np.ndarray:
     return gain_small  # (ds_h, ds_w, 3)
 
 
-# ---------------------------------------------------------------------------
 # Main calibration routine
-# ---------------------------------------------------------------------------
-
 def calibrate(image_path: Path | None = None):
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -189,9 +146,6 @@ def calibrate(image_path: Path | None = None):
     logger.info("White balance profile saved → %s  shape=%s", PROFILE_PATH, gain_maps.shape)
     print(f"\nProfile saved to: {PROFILE_PATH}")
     print("White balance will now be applied automatically by a_better_hope.py.")
-
-
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     img = Path(sys.argv[1]) if len(sys.argv) > 1 else None

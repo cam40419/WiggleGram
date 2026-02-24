@@ -1,8 +1,5 @@
 import os
-import signal
-import time
 import logging
-import threading
 from typing import List, Tuple, Optional, Literal
 
 import cv2
@@ -10,97 +7,14 @@ import numpy as np
 from PIL import Image, ImageOps, ImageFile
 
 from pathlib import Path
-from datetime import datetime
-import subprocess
-
-from flash import trigger as flash_trigger
-
-REPO_ROOT = Path(__file__).resolve().parents[1]   # src/ -> repo root
-COLOR_PROFILE_PATH = REPO_ROOT / "src/color_profile.npz"
-WB_PROFILE_PATH = REPO_ROOT / "src/white_balance/wb_profile.npz"
-
-# ── Flash timing ─────────────────────────────────────────────────────────────
-# rpicam-still is started with "-t 0 --signal" so it waits indefinitely.
-# Python sleeps for AWB_SETTLE_S to let AWB/AE converge, then fires the flash
-# and sends SIGUSR1 to rpicam-still at the same instant, guaranteeing that the
-# shutter and flash are synchronised regardless of subprocess startup jitter.
-AWB_SETTLE_MS  = 1000                     # AWB/AE settle time before capture (ms)
-AWB_SETTLE_S   = AWB_SETTLE_MS / 1000.0  # same value in seconds
-SHUTTER_US     = 16667                   # shutter speed in µs (16667 ≈ 1/60 s)
-# Measured offset between SIGUSR1 and actual shutter open.
-# Flash fires this many seconds AFTER SIGUSR1 so it coincides with shutter open.
-FLASH_OFFSET_S = 0.10                  # seconds (36 ms measured offset)
-
-
-def resolve_input_file() -> Path:
-    captured_files = sorted((REPO_ROOT / "input").glob("photo_*.jpg"))
-    if captured_files:
-        return captured_files[-1]
-    return REPO_ROOT / "input" / "ben" / "IMG_1638.JPG"
-
-# Capture photo on RPi and process it
-def capture_and_process():
-    
-    # Generate filename with current datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    input_file = REPO_ROOT / "input" / f"photo_{timestamp}.jpg"
-    output_dir = REPO_ROOT / "output" / timestamp
-    
-    # Create input directory if it doesn't exist
-    input_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Capture photo on RPi
-    try:
-        # Start rpicam-still in signal-triggered mode.  It will begin AWB/AE
-        # immediately but NOT capture until it receives SIGUSR1.  This lets us
-        # fire the flash and trigger the shutter at exactly the same instant,
-        # with no dependency on subprocess startup timing.
-        proc = subprocess.Popen(
-            [
-                "rpicam-still",
-                "-o", str(input_file),
-                "--nopreview",
-                "--quality", "95",             # 95 is perceptually lossless
-                #"--autofocus-mode", "manual",  # Fix focus if camera doesn't move
-                "--awb", "auto",               # Let AWB converge during the settle window
-                "--denoise", "cdn_hq",         # Clean up grain in ceiling shadows
-                "--sharpness", "1.5",          # Bump sharpness for pipe edges
-                "--ev", "0.5",
-                "-t", "0",                     # Wait indefinitely (until SIGUSR1)
-                "--signal",                    # Capture on SIGUSR1
-                "--shutter", str(SHUTTER_US),  # Fixed shutter speed (µs)
-            ],
-        )
-
-        # Wait for AWB/AE to converge, then fire flash + shutter simultaneously.
-        time.sleep(AWB_SETTLE_S)
-        # Trigger shutter first, then fire flash after the measured offset so
-        # the flash pulse coincides with the shutter being open.
-        flash_thread = threading.Thread(target=flash_trigger, args=(FLASH_OFFSET_S,), daemon=True)
-        flash_thread.start()
-        os.kill(proc.pid, signal.SIGUSR1)      # trigger capture immediately
-
-        # rpicam-still --signal stays alive after capturing; wait for the
-        # file to be written then send SIGINT to make it exit cleanly.
-        flash_thread.join()                    # GPIO cleanup first
-        time.sleep(1.5)                        # let rpicam-still finish writing
-        proc.send_signal(signal.SIGINT)
-        proc.wait()
-        logger.info(f"Photo captured: {input_file}")
-    except Exception as e:
-        logger.error(f"Failed to capture photo: {e}")
-        return
-    
-    # Process the captured photo
-    main(str(input_file), str(output_dir))
-
-# INPUT_DIR = resolve_input_file()
-# OUTPUT_DIR = REPO_ROOT / "output" / "ben"
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 logger = logging.getLogger(__name__)
 
 AxisType = Literal["x", "xy"]
+
+# Calibration file path
+CALIBRATION_PATH = Path("src/calibrate/calibration.npz")
 
 # Main pipeline
 def main(raw_path: str, save_path: str):
@@ -114,10 +28,7 @@ def main(raw_path: str, save_path: str):
     pieces[2] = pieces[2].rotate(90, expand=True)
     pieces[3] = pieces[3].rotate(90, expand=True)
 
-    #pieces = apply_npz_transforms(pieces, REPO_ROOT / "calibration_4cam.npz")
-
-    #pieces = apply_color_correction(pieces)
-    #pieces = apply_white_balance(pieces)
+    pieces = apply_calibration(pieces, CALIBRATION_PATH)
 
     w, h = pieces[0].size
     target_xy = (w // 2, h // 2)
@@ -135,6 +46,97 @@ def main(raw_path: str, save_path: str):
         duration_ms=100,
         crop_common=True,
     )
+
+
+def apply_calibration(
+    images: List[Image.Image],
+    calib_path: Path = CALIBRATION_PATH,
+) -> List[Image.Image]:
+    """Apply all calibration corrections from a unified calibration file.
+
+    The calibration file should contain:
+    - 'angles': rotation angles (4,) float32 - CCW degrees per camera
+    - 'ccms': color correction matrices (4, 3, 3) float32
+    - 'gain_maps': white balance gain maps (4, ds_h, ds_w, 3) float32
+
+    If the file does not exist, images are returned unchanged.
+    """
+    if not calib_path.exists():
+        logger.warning("Calibration file not found: %s (skipping all calibrations)", calib_path)
+        return images
+
+    data = np.load(str(calib_path))
+    
+    # Apply rotation calibration
+    if "angles" in data:
+        angles = data["angles"].astype(float)
+        rotated_images: List[Image.Image] = []
+        for idx, im in enumerate(images):
+            if idx >= len(angles) or abs(angles[idx]) < 1e-4:
+                rotated_images.append(im)
+            else:
+                rotated = im.rotate(
+                    float(angles[idx]),
+                    resample=Image.Resampling.BICUBIC,
+                    expand=False,
+                )
+                rotated_images.append(rotated)
+                logger.info("Rotation calibration applied to camera %d: %.4f°", idx, angles[idx])
+        images = rotated_images
+    
+    # Apply white balance calibration
+    if "gain_maps" in data:
+        gain_maps = data["gain_maps"]
+        wb_images: List[Image.Image] = []
+        for idx, im in enumerate(images):
+            if idx >= len(gain_maps):
+                wb_images.append(im)
+                continue
+            arr = np.asarray(im.convert("RGB")).astype(np.float32)
+            h, w = arr.shape[:2]
+            
+            # Upsample stored gain map back to full image resolution
+            gm = cv2.resize(gain_maps[idx], (w, h), interpolation=cv2.INTER_LINEAR)
+            
+            # Apply in linear space
+            lin = _srgb_to_linear(arr)
+            lin_wb = np.clip(lin * gm, 0.0, 1.0)
+            out = np.clip(_linear_to_srgb(lin_wb) * 255.0, 0, 255).astype(np.uint8)
+            wb_images.append(Image.fromarray(out))
+            logger.info("White balance applied to camera %d", idx)
+        images = wb_images
+    
+    # Apply color correction calibration
+    if "ccms" in data:
+        ccms = data["ccms"]
+        cc_images: List[Image.Image] = []
+        for idx, im in enumerate(images):
+            if idx >= len(ccms):
+                cc_images.append(im)
+                continue
+            arr = np.asarray(im.convert("RGB")).astype(np.float32)
+            lin = _srgb_to_linear(arr)
+            flat = lin.reshape(-1, 3)
+            flat_cc = flat @ ccms[idx].T
+            flat_cc = np.clip(flat_cc, 0.0, 1.0)
+            out = _linear_to_srgb(flat_cc.reshape(arr.shape))
+            out = np.clip(out * 255.0, 0, 255).astype(np.uint8)
+            cc_images.append(Image.fromarray(out))
+            logger.info("Color correction applied to camera %d", idx)
+        images = cc_images
+    
+    return images
+
+
+def _srgb_to_linear(x: np.ndarray) -> np.ndarray:
+    """Convert sRGB color values to linear RGB."""
+    x = x / 255.0
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(x: np.ndarray) -> np.ndarray:
+    """Convert linear RGB values to sRGB."""
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * (x ** (1.0 / 2.4)) - 0.055)
 
 
 def pick_anchors_template(
@@ -196,120 +198,6 @@ def pick_anchors_template(
                     idx, max_val, found_cx, found_cy, tx - found_cx, ty - found_cy)
 
     return anchors
-
-
-def apply_color_correction(images: List[Image.Image], profile_path: Path = COLOR_PROFILE_PATH) -> List[Image.Image]:
-    """Apply per-camera 3×3 colour-correction matrix loaded from *profile_path*.
-
-    The CCMs are produced by src/color_correct.py.  If the profile does not
-    exist the images are returned unchanged so the pipeline never hard-fails.
-    """
-    if not profile_path.exists():
-        logger.warning("Color profile not found: %s (skipping colour correction)", profile_path)
-        return images
-
-    data = np.load(str(profile_path))
-    ccms = data["ccms"]  # (4, 3, 3) float32
-
-    def srgb_to_linear(x: np.ndarray) -> np.ndarray:
-        x = x / 255.0
-        return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
-
-    def linear_to_srgb(x: np.ndarray) -> np.ndarray:
-        return np.where(x <= 0.0031308, x * 12.92, 1.055 * (x ** (1.0 / 2.4)) - 0.055)
-
-    corrected: List[Image.Image] = []
-    for idx, im in enumerate(images):
-        if idx >= len(ccms):
-            corrected.append(im)
-            continue
-        arr = np.asarray(im.convert("RGB")).astype(np.float32)
-        lin = srgb_to_linear(arr)               # (H, W, 3)
-        flat = lin.reshape(-1, 3)               # (N, 3)
-        flat_cc = flat @ ccms[idx].T            # apply CCM
-        flat_cc = np.clip(flat_cc, 0.0, 1.0)
-        out = linear_to_srgb(flat_cc.reshape(arr.shape))
-        out = np.clip(out * 255.0, 0, 255).astype(np.uint8)
-        corrected.append(Image.fromarray(out))
-        logger.info("Colour correction applied to camera %d", idx)
-
-    return corrected
-
-
-def apply_white_balance(images: List[Image.Image], profile_path: Path = WB_PROFILE_PATH) -> List[Image.Image]:
-    """Apply per-camera spatially-varying white balance / flat-field correction.
-
-    The gain maps are produced by src/wb_calibrate.py.  Each map is a
-    downsampled (1/8 res) float32 array of shape (ds_h, ds_w, 3) that encodes
-    how much to scale each channel at each pixel to neutralise the colour cast.
-    The map is upsampled bilinearly to the full image size before applying.
-
-    If the profile does not exist the images are returned unchanged.
-    """
-    if not profile_path.exists():
-        logger.warning("White balance profile not found: %s (skipping)", profile_path)
-        return images
-
-    data = np.load(str(profile_path))
-    if "gain_maps" not in data:
-        logger.warning("White balance profile is missing 'gain_maps' key — re-run wb_calibrate.py (skipping)")
-        return images
-
-    gain_maps = data["gain_maps"]  # (4, ds_h, ds_w, 3) float32
-
-    def srgb_to_linear(x: np.ndarray) -> np.ndarray:
-        x = np.clip(x / 255.0, 0.0, 1.0)
-        return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
-
-    def linear_to_srgb(x: np.ndarray) -> np.ndarray:
-        x = np.clip(x, 0.0, 1.0)
-        return np.where(x <= 0.0031308, x * 12.92, 1.055 * (x ** (1.0 / 2.4)) - 0.055)
-
-    corrected: List[Image.Image] = []
-    for idx, im in enumerate(images):
-        if idx >= len(gain_maps):
-            corrected.append(im)
-            continue
-        arr = np.asarray(im.convert("RGB")).astype(np.float32)
-        h, w = arr.shape[:2]
-
-        # Upsample stored gain map back to full image resolution
-        gm = cv2.resize(gain_maps[idx], (w, h), interpolation=cv2.INTER_LINEAR)  # (H, W, 3)
-
-        lin = srgb_to_linear(arr)
-        lin_wb = np.clip(lin * gm, 0.0, 1.0)
-        out = np.clip(linear_to_srgb(lin_wb) * 255.0, 0, 255).astype(np.uint8)
-        corrected.append(Image.fromarray(out))
-        logger.info("White balance (spatial) applied to camera %d", idx)
-
-    return corrected
-
-
-def apply_npz_transforms(images: List[Image.Image], npz_path: Path) -> List[Image.Image]:
-    if not npz_path.exists():
-        logger.warning("Calibration file not found: %s (skipping npz transforms)", npz_path)
-        return images
-
-    data = np.load(npz_path, allow_pickle=True)
-    Ks = np.asarray(data["Ks"], dtype=np.float64)
-    raw_dists = data["dists"]
-
-    transformed: List[Image.Image] = []
-    for idx, im in enumerate(images):
-        if idx >= len(Ks) or idx >= len(raw_dists):
-            transformed.append(im)
-            continue
-
-        dist = np.asarray(raw_dists[idx], dtype=np.float64).reshape(-1, 1)
-
-        rgb = np.asarray(im)
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        undistorted = cv2.undistort(bgr, Ks[idx], dist)
-        undistorted_rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
-        transformed.append(Image.fromarray(undistorted_rgb))
-
-    return transformed
-
 
 # Image loading
 def load_images(input_path: str) -> List[Image.Image]:
@@ -482,5 +370,5 @@ def crop_to_common_valid_area(frames: List[Image.Image], shifts: List[Tuple[int,
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    capture_and_process()
-    #main(str(INPUT_DIR), str(OUTPUT_DIR))
+    # This file now contains only wigglegram creation functions.
+    # Use camera_capture.py to capture and process photos.

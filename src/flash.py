@@ -1,29 +1,14 @@
-"""
-flash.py  –  fire the transistor flash on BCM GPIO 26 once.
-"""
-
 import time
 import threading
 import logging
 
 logger = logging.getLogger(__name__)
 
-FLASH_PIN = 26  # BCM
-
-# How long GPIO 26 stays HIGH (flash pulse duration)
-FLASH_DURATION_S = 0.1
+FLASH_PIN = 26
 
 
 def trigger(delay_s: float = 0.0):
-    """Wait *delay_s* seconds, then drive GPIO 26 HIGH for FLASH_DURATION_S, then LOW.
-
-    Args:
-        delay_s: Seconds to wait before firing the flash.  Set this to match
-                 the AWB settle time used in rpicam-still (-t <ms> / 1000) so
-                 that the flash fires exactly when the shutter opens.
-                 Default 0.0 fires immediately.
-    """
-    print(f"Triggering flash on GPIO 26 (delay={delay_s:.3f}s)...")
+    logger.info(f"Triggering flash on GPIO 26 (delay={delay_s:.3f}s)...")
     if delay_s > 0:
         time.sleep(delay_s)
     try:
@@ -32,7 +17,7 @@ def trigger(delay_s: float = 0.0):
         GPIO.setwarnings(False)
         GPIO.setup(FLASH_PIN, GPIO.OUT, initial=GPIO.LOW)
         GPIO.output(FLASH_PIN, GPIO.HIGH)
-        time.sleep(FLASH_DURATION_S)
+        time.sleep(0.1)
         GPIO.output(FLASH_PIN, GPIO.LOW)
         GPIO.cleanup(FLASH_PIN)
         logger.info("Flash triggered on GPIO %d (delay=%.3fs)", FLASH_PIN, delay_s)
