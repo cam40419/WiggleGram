@@ -17,9 +17,18 @@ from gif_utils import load_gif_frames
 from pipeline import run_pipeline
 from viewfinder import MJPEGReader
 
-# Logging 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Logging configuration - write to both console and file
+LOG_FILE = Path(__file__).parent.parent / "wigglegram.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode='a'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
+logger.info(f"Logging to {LOG_FILE}")
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -197,28 +206,53 @@ class WiggleApp:
     # Draw DSLR-style camera info overlay
     def _draw_camera_info(self, img: Image.Image) -> Image.Image:
         """Draw camera settings and stats overlay like a DSLR viewfinder."""
+        # Ensure we have a mutable RGB image
+        img = img.convert("RGB").copy()
         draw = ImageDraw.Draw(img)
         w, h = img.size
+        logger.debug(f"Drawing camera info overlay on {w}x{h} image")
         
-        # Try to load a font, fall back to default if unavailable
-        try:
-            font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
-            font_med = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-        except:
+        # Try to load fonts with multiple fallback paths
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+        
+        font_large = None
+        font_med = None
+        font_small = None
+        
+        for font_path in font_paths:
+            try:
+                font_large = ImageFont.truetype(font_path, 40)
+                font_med = ImageFont.truetype(font_path, 28)
+                font_small = ImageFont.truetype(font_path, 24)
+                logger.debug(f"Loaded font: {font_path}")
+                break
+            except:
+                continue
+        
+        # Final fallback to default
+        if font_large is None:
             font_large = ImageFont.load_default()
             font_med = ImageFont.load_default()
             font_small = ImageFont.load_default()
+            logger.warning("Using default bitmap font - text may be small")
         
         # Helper to draw text with shadow
         def draw_text_shadow(xy, text, font, fill=(255, 255, 255)):
             x, y = xy
-            # Shadow
-            draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0))
+            # Shadow (thick black outline for visibility)
+            for dx in [-2, -1, 0, 1, 2]:
+                for dy in [-2, -1, 0, 1, 2]:
+                    if dx != 0 or dy != 0:
+                        draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
             # Main text
             draw.text((x, y), text, font=font, fill=fill)
         
-        # Top-left: Mode
+        # Top-left: Mode (bright yellow/orange for visibility)
         draw_text_shadow((20, 20), "WIGGLEGRAM", font_large, fill=(255, 200, 0))
         
         # Top-right: Time and storage
