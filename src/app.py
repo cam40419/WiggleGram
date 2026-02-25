@@ -14,7 +14,8 @@ from PIL import Image, ImageTk, ImageFile, ImageDraw, ImageFont
 import config as cfg
 from camera import do_capture, SHUTTER_US
 from gif_utils import load_gif_frames
-from pipeline import run_pipeline
+from pipeline import run_pipeline, split_grid, apply_rotation_calibration, apply_white_balance
+from manual_align import get_manual_anchors
 from viewfinder import MJPEGReader
 
 # Logging configuration - write to both console and file
@@ -380,16 +381,42 @@ class WiggleApp:
         except Exception as exc:
             logger.warning("4-up preview failed: %s", exc)
 
+        # Check if manual alignment is enabled - if so, get anchors on main thread first
+        selected_anchors = None
+        if cfg.get_runtime("manual_alignment", False):
+            logger.info("Manual alignment enabled - showing anchor selection GUI")
+            self.status_var.set("Select anchor point on each view…")
+            
+            try:
+                # Preprocess images to get the pieces (same as pipeline does)
+                raw_img = Image.open(str(input_file))
+                pieces = split_grid(raw_img, 2, 2)
+                pieces = [p.transpose(Image.Transpose.ROTATE_90) for p in pieces]
+                pieces = apply_rotation_calibration(pieces)
+                pieces = apply_white_balance(pieces)
+                
+                # Show manual alignment GUI on main thread
+                selected_anchors = get_manual_anchors(pieces)
+                
+                if selected_anchors is None:
+                    logger.warning("Manual alignment cancelled - will use automatic")
+                else:
+                    logger.info("Manual anchors selected: %s", selected_anchors)
+            except Exception as exc:
+                logger.error("Manual alignment failed: %s", exc)
+                selected_anchors = None
+
         # Show and start the indeterminate progress bar
         self._progress.pack(side="top", padx=20, pady=(2, 4))
         self._progress.start(20)   # step every 20 ms
+        self.status_var.set("Generating wigglegram…")
 
         def process_thread():
             try:
                 # Extract timestamp from input filename (e.g., photo_20260224_140322.jpg)
                 timestamp = input_file.stem.replace("photo_", "")
-                # call pipeline using the passed output dir directly
-                run_pipeline(str(input_file), str(output_dir), timestamp)
+                # call pipeline with pre-selected anchors (or None for automatic)
+                run_pipeline(str(input_file), str(output_dir), timestamp, anchors=selected_anchors)
                 gif_path = output_dir / f"{timestamp}.gif"
                 self.root.after(0, lambda: self._show_gif(gif_path))
             except Exception as exc:
@@ -484,30 +511,62 @@ class WiggleApp:
 
 # Main entry point
 if __name__ == "__main__":
-    # Prompt for manual alignment mode at startup
+    # Check for manual alignment mode setting
     import sys
+    import os
     from tkinter import messagebox
     
-    # Create temporary root for dialog
-    temp_root = tk.Tk()
-    temp_root.withdraw()
+    # Check environment variable first (for headless or scripted setups)
+    env_manual = os.getenv("WIGGLEGRAM_MANUAL_ALIGN", "").lower()
     
-    response = messagebox.askyesno(
-        "Alignment Mode",
-        "Enable manual anchor point selection?\n\n"
-        "Yes = Manually click alignment points for each photo\n"
-        "No = Automatic template-based alignment",
-        icon='question'
-    )
-    
-    if response:
+    if env_manual in ("1", "true", "yes"):
         cfg.set_runtime("manual_alignment", True)
-        logger.info("Manual alignment mode enabled")
-    else:
+        logger.info("=" * 60)
+        logger.info("MANUAL ALIGNMENT MODE ENABLED (from environment)")
+        logger.info("=" * 60)
+    elif env_manual in ("0", "false", "no"):
         cfg.set_runtime("manual_alignment", False)
-        logger.info("Automatic alignment mode enabled")
+        logger.info("Automatic alignment mode enabled (from environment)")
+    else:
+        # Show dialog prompt
+        logger.info("Showing alignment mode selection dialog...")
+        
+        try:
+            # Create temporary root for dialog
+            temp_root = tk.Tk()
+            temp_root.withdraw()
+            temp_root.attributes('-topmost', True)  # Keep on top
+            temp_root.update()
+            
+            response = messagebox.askyesno(
+                "Alignment Mode",
+                "Enable manual anchor point selection?\n\n"
+                "Yes = Manually click alignment points for each photo\n"
+                "No = Automatic template-based alignment\n\n"
+                "(Set WIGGLEGRAM_MANUAL_ALIGN=true to skip this dialog)",
+                icon='question',
+                parent=temp_root
+            )
+            
+            temp_root.destroy()
+            
+            if response:
+                cfg.set_runtime("manual_alignment", True)
+                logger.info("=" * 60)
+                logger.info("MANUAL ALIGNMENT MODE ENABLED")
+                logger.info("=" * 60)
+            else:
+                cfg.set_runtime("manual_alignment", False)
+                logger.info("Automatic alignment mode enabled")
+                
+        except Exception as e:
+            logger.warning("Dialog failed: %s - defaulting to automatic alignment", e)
+            cfg.set_runtime("manual_alignment", False)
     
-    temp_root.destroy()
+    # Log final setting
+    is_manual = cfg.get_runtime("manual_alignment", False)
+    logger.info("Starting app with alignment mode: %s", 
+                "MANUAL" if is_manual else "AUTOMATIC")
     
     # Start main application
     root = tk.Tk()

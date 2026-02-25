@@ -256,8 +256,21 @@ def wigglegram_anchors(
     logger.info("Saved wiggle GIF to %s (axis=%s)", out_path, axis)
 
 
-def run_pipeline(raw_path: str, save_path: str, timestamp: str):
-    """Full wigglegram processing pipeline."""
+def run_pipeline(
+    raw_path: str, 
+    save_path: str, 
+    timestamp: str,
+    anchors: Optional[List[Optional[Tuple[int, int]]]] = None
+):
+    """
+    Full wigglegram processing pipeline.
+    
+    Args:
+        raw_path: Path to raw 2x2 grid image
+        save_path: Output directory for GIF
+        timestamp: Filename prefix for output
+        anchors: Optional pre-selected anchor points. If None, will auto-detect or use manual GUI
+    """
     raw    = Image.open(raw_path)
     pieces = split_grid(raw, 2, 2)
     pieces = [p.transpose(Image.Transpose.ROTATE_90) for p in pieces]
@@ -268,15 +281,19 @@ def run_pipeline(raw_path: str, save_path: str, timestamp: str):
     w, h      = pieces[0].size
     target_xy = (w // 2, h // 2)
     
-    # Check if manual alignment mode is enabled
-    if cfg.get_runtime("manual_alignment", False):
-        logger.info("Manual alignment mode enabled - launching GUI")
-        anchors = get_manual_anchors(pieces)
-        if anchors is None:
-            logger.warning("Manual alignment cancelled - falling back to automatic")
+    # Use provided anchors or detect them
+    if anchors is None:
+        # Check if manual alignment mode is enabled
+        if cfg.get_runtime("manual_alignment", False):
+            logger.info("Manual alignment mode enabled - launching GUI")
+            anchors = get_manual_anchors(pieces)
+            if anchors is None:
+                logger.warning("Manual alignment cancelled - falling back to automatic")
+                anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
+        else:
             anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
     else:
-        anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
+        logger.info("Using pre-selected anchor points")
     
     # save_anchor_debug(pieces, anchors, save_path)
     wigglegram_anchors(
