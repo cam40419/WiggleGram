@@ -484,6 +484,32 @@ class WiggleApp:
 
 # Main entry point
 if __name__ == "__main__":
+    # Prompt for manual alignment mode at startup
+    import sys
+    from tkinter import messagebox
+    
+    # Create temporary root for dialog
+    temp_root = tk.Tk()
+    temp_root.withdraw()
+    
+    response = messagebox.askyesno(
+        "Alignment Mode",
+        "Enable manual anchor point selection?\n\n"
+        "Yes = Manually click alignment points for each photo\n"
+        "No = Automatic template-based alignment",
+        icon='question'
+    )
+    
+    if response:
+        cfg.set_runtime("manual_alignment", True)
+        logger.info("Manual alignment mode enabled")
+    else:
+        cfg.set_runtime("manual_alignment", False)
+        logger.info("Automatic alignment mode enabled")
+    
+    temp_root.destroy()
+    
+    # Start main application
     root = tk.Tk()
     app  = WiggleApp(root)
     root.mainloop()

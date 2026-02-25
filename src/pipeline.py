@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 import config as cfg
+from manual_align import get_manual_anchors
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +267,17 @@ def run_pipeline(raw_path: str, save_path: str, timestamp: str):
 
     w, h      = pieces[0].size
     target_xy = (w // 2, h // 2)
-    anchors   = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
+    
+    # Check if manual alignment mode is enabled
+    if cfg.get_runtime("manual_alignment", False):
+        logger.info("Manual alignment mode enabled - launching GUI")
+        anchors = get_manual_anchors(pieces)
+        if anchors is None:
+            logger.warning("Manual alignment cancelled - falling back to automatic")
+            anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
+    else:
+        anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
+    
     # save_anchor_debug(pieces, anchors, save_path)
     wigglegram_anchors(
         pieces, anchors=anchors, save_dir=save_path, filename=timestamp,
