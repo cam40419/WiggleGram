@@ -372,15 +372,6 @@ class WiggleApp:
         self.state = self.STATE_PROCESSING
         self.status_var.set("Processing…")
 
-        # Show all 4 cameras side by side
-        try:
-            raw = Image.open(str(input_file)).convert("RGB")
-            # Reserve bottom bar space
-            composite = self._build_4up(raw, self.screen_w, self.screen_h - 60)
-            self._show_pil(composite)
-        except Exception as exc:
-            logger.warning("4-up preview failed: %s", exc)
-
         # Check if manual alignment is enabled - if so, get anchors on main thread first
         selected_anchors = None
         if cfg.get_runtime("manual_alignment", False):
@@ -395,8 +386,8 @@ class WiggleApp:
                 pieces = apply_rotation_calibration(pieces)
                 pieces = apply_white_balance(pieces)
                 
-                # Show manual alignment GUI on main thread
-                selected_anchors = get_manual_anchors(pieces)
+                # Show manual alignment GUI on main thread (pass parent window)
+                selected_anchors = get_manual_anchors(pieces, parent=self.root)
                 
                 if selected_anchors is None:
                     logger.warning("Manual alignment cancelled - will use automatic")
@@ -405,6 +396,15 @@ class WiggleApp:
             except Exception as exc:
                 logger.error("Manual alignment failed: %s", exc)
                 selected_anchors = None
+        
+        # Show all 4 cameras side by side (after manual selection or if automatic)
+        try:
+            raw = Image.open(str(input_file)).convert("RGB")
+            # Reserve bottom bar space
+            composite = self._build_4up(raw, self.screen_w, self.screen_h - 60)
+            self._show_pil(composite)
+        except Exception as exc:
+            logger.warning("4-up preview failed: %s", exc)
 
         # Show and start the indeterminate progress bar
         self._progress.pack(side="top", padx=20, pady=(2, 4))

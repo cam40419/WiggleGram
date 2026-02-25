@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 class ManualAlignmentWindow:
     """GUI for manually selecting alignment anchor points on each camera view."""
     
-    def __init__(self, images: List[Image.Image]):
+    def __init__(self, images: List[Image.Image], parent: Optional[tk.Tk] = None):
         """
         Initialize manual alignment window.
         
         Args:
             images: List of PIL Images (one per camera)
+            parent: Parent Tk window (if None, creates new Tk instance for standalone use)
         """
         self.images = images
         self.num_images = len(images)
@@ -28,10 +29,26 @@ class ManualAlignmentWindow:
         self.points: List[Optional[Tuple[int, int]]] = [None] * self.num_images
         self.result: Optional[List[Optional[Tuple[int, int]]]] = None
         
-        # Create window
-        self.root = tk.Tk()
+        # Create window - use Toplevel if parent exists, otherwise Tk for standalone
+        if parent is not None:
+            self.root = tk.Toplevel(parent)
+            self.is_toplevel = True
+        else:
+            self.root = tk.Tk()
+            self.is_toplevel = False
+            
         self.root.title("Manual Anchor Point Selection")
         self.root.configure(bg="#1e1e1e")
+        
+        # Make it fullscreen and modal if it's a Toplevel
+        if self.is_toplevel:
+            self.root.attributes('-fullscreen', True)
+            self.root.attributes('-topmost', True)
+            self.root.grab_set()  # Make modal
+            self.root.focus_force()
+        
+        # Handle window close
+        self.root.protocol("WM_DELETE_WINDOW", self._on_cancel)
         
         # State variables
         self.display_scale = 1.0
@@ -49,7 +66,7 @@ class ManualAlignmentWindow:
         
         instruction_text = (
             "Click to select the same anchor point on each image (e.g., center of subject's nose)\n"
-            "Use arrow keys or buttons to navigate. Press Generate when all points are set."
+            "Arrow keys: Navigate | Enter: Generate | Escape: Cancel"
         )
         self.instruction_label = tk.Label(
             self.instruction_frame, text=instruction_text,
@@ -95,12 +112,19 @@ class ManualAlignmentWindow:
         )
         self.next_btn.pack(side=tk.LEFT, padx=5)
         
+        self.cancel_btn = tk.Button(
+            button_frame, text="✗ Cancel", command=self._on_cancel,
+            font=("Arial", 11), width=12,
+            bg="#8B0000", fg="#ffffff"
+        )
+        self.cancel_btn.pack(side=tk.LEFT, padx=5)
+        
         self.generate_btn = tk.Button(
             button_frame, text="✓ Generate", command=self._confirm_and_close,
             font=("Arial", 11, "bold"), width=12, state=tk.DISABLED,
             bg="#0e639c", fg="#ffffff"
         )
-        self.generate_btn.pack(side=tk.LEFT, padx=20)
+        self.generate_btn.pack(side=tk.LEFT, padx=5)
         
         # Preview thumbnails
         self.preview_frame = tk.Frame(self.control_frame, bg="#2d2d30")
@@ -131,6 +155,7 @@ class ManualAlignmentWindow:
         self.root.bind("<Left>", lambda e: self._prev_image())
         self.root.bind("<Right>", lambda e: self._next_image())
         self.root.bind("<Return>", lambda e: self._confirm_and_close())
+        self.root.bind("<Escape>", lambda e: self._on_cancel())
         
     def _load_image(self, index: int):
         """Load and display image at given index."""
@@ -290,6 +315,18 @@ class ManualAlignmentWindow:
         if self.current_index > 0:
             self._load_image(self.current_index - 1)
     
+    def _on_cancel(self):
+        """Handle window close/cancel."""
+        logger.info("Manual alignment cancelled by user")
+        self.result = None
+        
+        if self.is_toplevel:
+            self.root.grab_release()
+            self.root.destroy()
+        else:
+            self.root.quit()
+            self.root.destroy()
+    
     def _confirm_and_close(self):
         """Confirm all points are set and close window."""
         if not all(p is not None for p in self.points):
@@ -301,8 +338,13 @@ class ManualAlignmentWindow:
         
         logger.info("Manual alignment complete: %s", self.points)
         self.result = self.points
-        self.root.quit()
-        self.root.destroy()
+        
+        if self.is_toplevel:
+            self.root.grab_release()
+            self.root.destroy()
+        else:
+            self.root.quit()
+            self.root.destroy()
     
     def run(self) -> Optional[List[Optional[Tuple[int, int]]]]:
         """
@@ -312,22 +354,31 @@ class ManualAlignmentWindow:
             List of (x, y) tuples for each image, or None if cancelled
         """
         try:
-            self.root.mainloop()
+            if self.is_toplevel:
+                # For Toplevel, just wait for it to be destroyed
+                self.root.wait_window()
+            else:
+                # For standalone Tk, run mainloop
+                self.root.mainloop()
             return self.result
         except Exception as e:
             logger.error("Manual alignment window error: %s", e)
             return None
 
 
-def get_manual_anchors(images: List[Image.Image]) -> Optional[List[Optional[Tuple[int, int]]]]:
+def get_manual_anchors(
+    images: List[Image.Image], 
+    parent: Optional[tk.Tk] = None
+) -> Optional[List[Optional[Tuple[int, int]]]]:
     """
     Show GUI to manually select anchor points.
     
     Args:
         images: List of PIL Images to align
+        parent: Parent Tk window (pass the main app window for modal dialog)
         
     Returns:
         List of anchor points (x, y) or None if cancelled
     """
-    window = ManualAlignmentWindow(images)
+    window = ManualAlignmentWindow(images, parent=parent)
     return window.run()
