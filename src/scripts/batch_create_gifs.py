@@ -25,7 +25,6 @@ from pipeline import (
     pick_anchors_template,
     wigglegram_anchors,
 )
-from manual_align import get_manual_anchors
 
 # Configure logging
 logging.basicConfig(
@@ -56,7 +55,7 @@ def find_jpg_images(input_dir: Path) -> List[Path]:
     return jpg_files
 
 
-def process_image(image_path: Path, output_dir: Path, manual_mode: bool = False):
+def process_image(image_path: Path, output_dir: Path):
     """Process a single 2x2 grid image into a wigglegram GIF."""
     logger.info(f"Processing: {image_path.name}")
     
@@ -86,15 +85,7 @@ def process_image(image_path: Path, output_dir: Path, manual_mode: bool = False)
         
         # Pick anchor points for alignment
         target_xy = (base_w // 2, base_h // 2)
-        
-        if manual_mode:
-            logger.info("Manual alignment mode - GUI will open")
-            anchors = get_manual_anchors(pieces)
-            if anchors is None:
-                logger.warning("Manual alignment cancelled - falling back to automatic")
-                anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
-        else:
-            anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
+        anchors = pick_anchors_template(pieces, target_xy=target_xy, ref_idx=1)
         
         # Create output directory if it doesn't exist
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -157,12 +148,6 @@ Examples:
         help="Enable verbose debug logging"
     )
     
-    parser.add_argument(
-        "-m", "--manual",
-        action="store_true",
-        help="Enable manual anchor point selection (GUI for each image)"
-    )
-    
     args = parser.parse_args()
     
     # Set logging level
@@ -181,8 +166,6 @@ Examples:
     logger.info("=" * 60)
     logger.info(f"Input directory:  {input_dir}")
     logger.info(f"Output directory: {output_dir}")
-    alignment_mode = "Manual" if args.manual else "Automatic"
-    logger.info(f"Alignment mode:   {alignment_mode}")
     logger.info("=" * 60)
     
     # Find all JPG images
@@ -201,7 +184,7 @@ Examples:
     
     for i, image_path in enumerate(jpg_files, 1):
         logger.info(f"[{i}/{len(jpg_files)}] {image_path.name}")
-        if process_image(image_path, output_dir, manual_mode=args.manual):
+        if process_image(image_path, output_dir):
             success_count += 1
         else:
             fail_count += 1

@@ -23,9 +23,7 @@ INPUT_DIR = MEDIA_DIR / "input"
 OUTPUT_DIR = MEDIA_DIR / "output"
 
 # Runtime config (can be updated during runtime)
-RUNTIME_CONFIG = {
-    "manual_alignment": False,  # Enable manual anchor point selection GUI
-}
+RUNTIME_CONFIG = {}
 
 def get_env_var(key, default=None):
     """Get an environment variable with an optional default."""
