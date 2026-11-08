@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import time
 import argparse
@@ -7,6 +8,9 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import cv2
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from camera_settings import still_command
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +42,7 @@ def capture_and_prepare_sets(
     base_dir: str,
     capture_count: int = 3,
     capture_delay: float = 0.4,
-    capture_command: str = "rpicam-still",
+    capture_command: str = None,
 ):
     """Capture multi-cam composite frames, split/rotate into cam0..cam3 synced sets."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -56,7 +60,7 @@ def capture_and_prepare_sets(
         frame_name = f"frame_{idx:02d}.jpg"
         raw_path = raw_dir / frame_name
         subprocess.run(
-            [capture_command, "-o", str(raw_path), "--nopreview"],
+            still_command(raw_path, executable=capture_command),
             check=True,
         )
 
@@ -270,7 +274,8 @@ def parse_args():
     parser.add_argument("--output-npz", default="calibration_4cam.npz")
     parser.add_argument("--capture-count", type=int, default=3)
     parser.add_argument("--capture-delay", type=float, default=0.4)
-    parser.add_argument("--capture-command", default="rpicam-still")
+    parser.add_argument("--capture-command", default=None,
+                        help="Override automatic rpicam-still/libcamera-still selection.")
     parser.add_argument(
         "--skip-capture",
         action="store_true",

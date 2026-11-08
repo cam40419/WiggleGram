@@ -4,4 +4,4 @@ opencv-python
 matplotlib
 mediapipe
 ultralytics
-opencv-python
+python-dotenv

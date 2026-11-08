@@ -13,6 +13,7 @@ from PIL import Image, ImageTk, ImageFile, ImageDraw, ImageFont
 
 import config as cfg
 from camera import do_capture, SHUTTER_US
+from camera_settings import VF_WIDTH, VF_HEIGHT, VF_FPS
 from gif_utils import load_gif_frames
 from pipeline import run_pipeline
 from viewfinder import MJPEGReader
@@ -33,9 +34,6 @@ logger.info(f"Logging to {LOG_FILE}")
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # UI Configuration
-VF_WIDTH       = 2028
-VF_HEIGHT      = 1520
-VF_FPS         = 15
 CROSSHAIR_LEN  = 30
 CROSSHAIR_GAP  = 6
 CROSSHAIR_CLR  = (255, 255, 255)

@@ -7,6 +7,8 @@ from typing import Optional
 
 from PIL import Image
 
+from camera_settings import VF_WIDTH, VF_HEIGHT, VF_FPS, viewfinder_command
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,8 +19,8 @@ class MJPEGReader(threading.Thread):
     _SOI = b"\xff\xd8"
     _EOI = b"\xff\xd9"
 
-    def __init__(self, frame_queue: queue.Queue, camera: int = 0,
-                 width: int = 2028, height: int = 1520, fps: int = 15):
+    def __init__(self, frame_queue: queue.Queue, camera: Optional[int] = None,
+                 width: int = VF_WIDTH, height: int = VF_HEIGHT, fps: int = VF_FPS):
         super().__init__(daemon=True)
         self.frame_queue = frame_queue
         self.camera      = camera
@@ -27,24 +29,26 @@ class MJPEGReader(threading.Thread):
         self.fps         = fps
         self._proc: Optional[subprocess.Popen] = None
         self._stop_event = threading.Event()
+        self._proc_lock = threading.Lock()
 
     def run(self):
-        cmd = [
-            "rpicam-vid",
-            "--camera", str(self.camera),
-            "-t", "0",
-            "--codec", "mjpeg",
-            "-o", "-",
-            "--width",  str(self.width),
-            "--height", str(self.height),
-            "--framerate", str(self.fps),
-            "--nopreview",
-        ]
-        logger.info("Starting viewfinder: %s", " ".join(cmd))
-        self._proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
+        try:
+            cmd = viewfinder_command(camera=self.camera, width=self.width,
+                                     height=self.height, fps=self.fps)
+            logger.info("Starting viewfinder: %s", " ".join(cmd))
+            with self._proc_lock:
+                if self._stop_event.is_set():
+                    return
+                self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+            self._read_frames()
+        except Exception:
+            logger.exception("Viewfinder failed; check the IMX519 driver and camera configuration")
+        finally:
+            self._stop_process()
+            if self._proc is not None and self._proc.stdout is not None:
+                self._proc.stdout.close()
 
+    def _read_frames(self):
         buf = b""
         while not self._stop_event.is_set():
             chunk = self._proc.stdout.read(4096)
@@ -75,12 +79,19 @@ class MJPEGReader(threading.Thread):
                 except Exception:
                     pass  # corrupt frame, skip
 
+    def _stop_process(self):
+        with self._proc_lock:
+            if self._proc and self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=3)
+
     def stop(self):
         self._stop_event.set()
-        if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
+        self._stop_process()
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=3)
         logger.info("Viewfinder stopped")

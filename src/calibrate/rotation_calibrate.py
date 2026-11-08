@@ -2,7 +2,7 @@
 rotation_calibrate.py – Interactive rotation calibration for the 4-camera wigglegram rig.
 
 Usage:
-    DISPLAY=:0 python3 src/rotation_calibrate.py [input_image.jpg]
+    DISPLAY=:0 python3 src/calibrate/rotation_calibrate.py [input_image.jpg]
 
 Flow:
   1. A fullscreen prompt asks you to press the physical shutter button (or SPACE)
@@ -17,12 +17,11 @@ Flow:
 If you pass an existing image path the capture step is skipped.
 """
 
+from __future__ import annotations
+
 import sys
-import io
-import os
 import math
 import queue
-import signal
 import argparse
 import subprocess
 import threading
@@ -34,14 +33,19 @@ from datetime import datetime
 import numpy as np
 from PIL import Image, ImageTk, ImageDraw
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import config as cfg
+from camera_settings import (
+    VF_WIDTH, VF_HEIGHT, VF_FPS, SETTLE_MS, CAPTURE_TIMEOUT_S, still_command,
+)
+from viewfinder import MJPEGReader
+
 # ── Paths ──────────────────────────────────────────────────────────────────────
-REPO_ROOT  = Path(__file__).resolve().parents[1]
-CALIB_OUT  = REPO_ROOT / "rotation_calibration.npz"
+CALIB_OUT  = cfg.ROTATION_CALIBRATION_PATH
 NUM_CAMS   = 4
 
 # ── GPIO / shutter ─────────────────────────────────────────────────────────────
 SHUTTER_PIN = 5          # BCM GPIO pin (active-LOW, pull-up) – same as prod.py
-AWB_SETTLE_S = 2.0       # seconds to let AWB settle before capture
 SHUTTER_US   = 16667     # 1/60 s fixed shutter (µs)
 
 try:
@@ -52,75 +56,6 @@ try:
     _GPIO_AVAILABLE = True
 except Exception:
     _GPIO_AVAILABLE = False
-
-
-VF_WIDTH  = 2028
-VF_HEIGHT = 1520
-VF_FPS    = 15
-
-
-# ── MJPEG viewfinder reader ────────────────────────────────────────────────────
-
-class MJPEGReader(threading.Thread):
-    """Streams MJPEG frames from rpicam-vid into a queue (daemon thread)."""
-    _SOI = b"\xff\xd8"
-    _EOI = b"\xff\xd9"
-
-    def __init__(self, frame_queue: queue.Queue):
-        super().__init__(daemon=True)
-        self.frame_queue = frame_queue
-        self._proc: subprocess.Popen | None = None
-        self._stop = threading.Event()
-
-    def run(self):
-        cmd = [
-            "rpicam-vid",
-            "-t", "0",
-            "--codec", "mjpeg",
-            "-o", "-",
-            "--width",     str(VF_WIDTH),
-            "--height",    str(VF_HEIGHT),
-            "--framerate", str(VF_FPS),
-            "--nopreview",
-        ]
-        self._proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-        buf = b""
-        while not self._stop.is_set():
-            chunk = self._proc.stdout.read(4096)
-            if not chunk:
-                break
-            buf += chunk
-            while True:
-                soi = buf.find(self._SOI)
-                if soi == -1:
-                    buf = b""
-                    break
-                eoi = buf.find(self._EOI, soi + 2)
-                if eoi == -1:
-                    buf = buf[soi:]
-                    break
-                jpeg = buf[soi:eoi + 2]
-                buf  = buf[eoi + 2:]
-                try:
-                    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
-                    try:
-                        self.frame_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    self.frame_queue.put_nowait(img)
-                except Exception:
-                    pass
-
-    def stop(self):
-        self._stop.set()
-        if self._proc and self._proc.poll() is None:
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
 
 
 def _extract_cam1(frame: Image.Image) -> Image.Image:
@@ -137,7 +72,7 @@ def resolve_input_image(arg: str | None) -> Path:
         if p.exists():
             return p
         raise FileNotFoundError(f"Input image not found: {arg}")
-    candidates = sorted((REPO_ROOT / "input").glob("photo_*.jpg"))
+    candidates = sorted(cfg.INPUT_DIR.glob("photo_*.jpg"))
     if candidates:
         return candidates[-1]
     raise FileNotFoundError(
@@ -527,6 +462,7 @@ class SummaryUI:
         self.root.bind("<Escape>", lambda _: self.root.destroy())
 
     def _save(self):
+        CALIB_OUT.parent.mkdir(parents=True, exist_ok=True)
         np.savez(str(CALIB_OUT), angles=np.array(self.angles, dtype=np.float32))
         print(f"Saved rotation calibration → {CALIB_OUT}")
         print("  angles (CCW degrees per camera):", self.angles)
@@ -652,37 +588,21 @@ class CaptureUI:
         self.root.destroy()
 
     def _capture(self):
-        import time as _time
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path  = REPO_ROOT / "input" / f"rotcalib_{timestamp}.jpg"
+        out_path  = cfg.INPUT_DIR / f"rotcalib_{timestamp}.jpg"
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.root.after(0, lambda: self._set_status("Capturing…"))
         try:
-            proc = subprocess.Popen([
-                "rpicam-still",
-                "-o", str(out_path),
-                "--nopreview",
-                "--quality", "100",
-                "--awb", "auto",
-                "--denoise", "cdn_hq",
-                "--sharpness", "1.5",
-                "-t", "0",
-                "--signal",
-                "--shutter", str(SHUTTER_US),
-            ])
-            _time.sleep(AWB_SETTLE_S)
-            os.kill(proc.pid, signal.SIGUSR1)
-            _time.sleep(1.5)
-            proc.send_signal(signal.SIGINT)
-            proc.wait()
+            subprocess.run(still_command(out_path, shutter_us=SHUTTER_US),
+                           check=True, timeout=SETTLE_MS / 1000 + CAPTURE_TIMEOUT_S)
 
             self.result_path = out_path
             name = out_path.name
             self.root.after(0, lambda: self._set_status(f"Captured: {name}"))
             self.root.after(800, self.root.destroy)
         except Exception as exc:
-            self.root.after(0, lambda: self._set_status(f"Capture failed: {exc}"))
+            self.root.after(0, lambda message=str(exc): self._set_status(f"Capture failed: {message}"))
             self._triggered = False   # allow retry
 
     def run(self) -> Path | None:

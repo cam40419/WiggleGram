@@ -10,13 +10,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageFile, ImageOps
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import config as cfg
+from camera_settings import still_command
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PROFILE_DIR = Path(__file__).resolve().parent / "white_balance"
-PROFILE_PATH = PROFILE_DIR / "wb_profile.npz"
+PROFILE_PATH = cfg.WB_PROFILE_PATH
+PROFILE_DIR = PROFILE_PATH.parent
 
 # Store gain maps at 1/8 of camera resolution — enough to capture vignetting,
 # tiny enough to keep the .npz small.
@@ -41,23 +44,10 @@ def linear_to_srgb(x: np.ndarray) -> np.ndarray:
 # Capture / split
 def capture_image() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = REPO_ROOT / "input" / f"wb_calibration_{timestamp}.jpg"
+    out = cfg.INPUT_DIR / f"wb_calibration_{timestamp}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Capturing image with rpicam-still → %s", out)
-    subprocess.run(
-        [
-            "rpicam-still",
-            "-o", str(out),
-            "--nopreview",
-            "--quality", "95",
-            "--autofocus-mode", "manual",
-            "--awb", "auto",
-            "--immediate",
-            "-t", "500",
-            "--tuning-file", "/usr/share/libcamera/ipa/rpi/vc4/imx219_noir.json",
-        ],
-        check=True,
-    )
+    subprocess.run(still_command(out), check=True)
     return out
 
 
@@ -145,7 +135,7 @@ def calibrate(image_path: Path | None = None):
     np.savez(str(PROFILE_PATH), gain_maps=gain_maps)
     logger.info("White balance profile saved → %s  shape=%s", PROFILE_PATH, gain_maps.shape)
     print(f"\nProfile saved to: {PROFILE_PATH}")
-    print("White balance will now be applied automatically by a_better_hope.py.")
+    print("White balance will now be applied automatically by the wigglegram pipeline.")
 
 if __name__ == "__main__":
     img = Path(sys.argv[1]) if len(sys.argv) > 1 else None

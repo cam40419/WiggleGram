@@ -3,14 +3,14 @@ import logging
 from pathlib import Path
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config as cfg
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Paths
-SCRIPT_DIR = Path(__file__).resolve().parent
-INDIVIDUAL_DIR = SCRIPT_DIR / "individual"
+INDIVIDUAL_DIR = cfg.NPZ_DIR
 
 
 def load_calibration_file(path: Path):
@@ -32,11 +32,12 @@ def load_calibration_file(path: Path):
 
 def combine_all_calibrations(output_dir: Path) -> bool:
     """
-    Combine all calibration files in the individual/ folder into a single .npz file in output_dir.
+    Combine the current modules' calibration profiles into a single .npz file.
     """
     output_path = output_dir / "combined_calibration.npz"
     combined_data = {}
-    found_files = list(INDIVIDUAL_DIR.glob("*.npz"))
+    found_files = [path for path in INDIVIDUAL_DIR.glob("*.npz")
+                   if path.name != "combined_calibration.npz"]
     if not found_files:
         logger.error(f"No calibration files found in {INDIVIDUAL_DIR}")
         return False

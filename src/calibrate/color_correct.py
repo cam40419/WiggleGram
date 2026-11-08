@@ -12,12 +12,15 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from PIL import Image, ImageFile, ImageOps
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import config as cfg
+from camera_settings import still_command
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PROFILE_PATH = Path(__file__).resolve().parent / "color_profile.npz"
+PROFILE_PATH = cfg.COLOR_PROFILE_PATH
 
 # ---------------------------------------------------------------------------
 # X-Rite ColorChecker Classic 24-patch sRGB reference values (D65, 8-bit)
@@ -50,14 +53,10 @@ N_PATCHES = N_ROWS * N_COLS
 # Image helpers (mirror the pipeline in a_better_hope.py)
 def capture_image() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = REPO_ROOT / "input" / f"calibration_{timestamp}.jpg"
+    out = cfg.INPUT_DIR / f"calibration_{timestamp}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Capturing image with rpicam-still → %s", out)
-    subprocess.run(
-        ["rpicam-still", "-o", str(out), "--nopreview", "--quality", "95",
-         "--autofocus-mode", "auto"],
-        check=True,
-    )
+    subprocess.run(still_command(out), check=True)
     return out
 
 
@@ -228,10 +227,11 @@ def calibrate(image_path: Path | None = None):
         ccms.append(ccm)
 
     ccms_array = np.stack(ccms, axis=0)  # (4, 3, 3)
+    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
     np.savez(str(PROFILE_PATH), ccms=ccms_array)
     logger.info("Color profile saved → %s", PROFILE_PATH)
     print(f"\nProfile saved to: {PROFILE_PATH}")
-    print("You can now use apply_color_correction() in a_better_hope.py.")
+    print("You can now enable apply_color_correction() in pipeline.py.")
 
 
 # ---------------------------------------------------------------------------
