@@ -39,6 +39,7 @@ from camera_settings import (
     VF_WIDTH, VF_HEIGHT, VF_FPS, SETTLE_MS, CAPTURE_TIMEOUT_S, still_command,
 )
 from viewfinder import MJPEGReader
+from framing import preview_view
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 CALIB_OUT  = cfg.ROTATION_CALIBRATION_PATH
@@ -59,9 +60,8 @@ except Exception:
 
 
 def _extract_cam1(frame: Image.Image) -> Image.Image:
-    """Crop top-right quadrant of the 2×2 composite and rotate 90° CW."""
-    w, h = frame.size
-    return frame.crop((w // 2, 0, w, h // 2)).rotate(90, expand=True)
+    """Match the app's rotated, 16:9 top-right viewfinder."""
+    return preview_view(frame)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

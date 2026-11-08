@@ -15,6 +15,7 @@ import config as cfg
 from camera import do_capture, SHUTTER_US
 from camera_settings import VF_WIDTH, VF_HEIGHT, VF_FPS
 from gif_utils import load_gif_frames
+from framing import preview_view
 from pipeline import run_pipeline
 from viewfinder import MJPEGReader
 
@@ -191,17 +192,11 @@ class WiggleApp:
         elif self.state == self.STATE_GIF:
             self._return_to_viewfinder()
 
-    # Extract camera 1 (top-right quadrant, rotated 90°)
+    # Extract camera 1 and show the same 16:9 framing as the output.
     @staticmethod
     def _extract_cam1(frame: Image.Image) -> Image.Image:
-        """Crop the top-right quadrant of the 2×2 grid and rotate 90° CW."""
-        w, h = frame.size
-        # top-right: col=1, row=0
-        left  = w // 2
-        upper = 0
-        right = w
-        lower = h // 2
-        return frame.crop((left, upper, right, lower)).rotate(90, expand=True)
+        """Extract the top-right view, rotate 90° CCW, and center-crop to 16:9."""
+        return preview_view(frame)
 
     # Viewfinder poll (runs every 33 ms on tkinter main thread)
     def _poll_viewfinder(self):
@@ -286,7 +281,7 @@ class WiggleApp:
         
         # Bottom-right: Resolution and FPS
         y_offset = h - 76  # Pre-calculated offset for 2 lines
-        res_text = f"{VF_WIDTH}×{VF_HEIGHT}"
+        res_text = f"{w}×{h}  16:9"
         fps_text = f"{VF_FPS} FPS"
         
         bbox = draw.textbbox((0, 0), res_text, font=self._font_small)
@@ -341,18 +336,9 @@ class WiggleApp:
     # Build 4-up composite from raw 2×2 capture
     @staticmethod
     def _build_4up(raw: Image.Image, target_w: int, target_h: int) -> Image.Image:
-        """Split the 2x2 grid, rotate each 90° CW, lay them out side-by-side."""
-        iw, ih = raw.size
-        pw, ph = iw // 2, ih // 2
-        # split_grid order: row-major → indices 0=TL,1=TR,2=BL,3=BR
-        quads = [
-            raw.crop((0,   0,   pw,  ph)),   # cam 0 – top-left
-            raw.crop((pw,  0,   iw,  ph)),   # cam 1 – top-right
-            raw.crop((0,   ph,  pw,  ih)),   # cam 2 – bottom-left
-            raw.crop((pw,  ph,  iw,  ih)),   # cam 3 – bottom-right
-        ]
-        rotated = [q.rotate(90, expand=True) for q in quads]
-        # Each rotated piece is ph×pw; lay 4 side by side
+        """Show the four rotated camera views with the output's 16:9 framing."""
+        rotated = [preview_view(raw, camera_index) for camera_index in range(4)]
+        # Lay the framed views side by side.
         cell_w = target_w // 4
         cell_h = target_h
         composite = Image.new("RGB", (target_w, target_h), (0, 0, 0))

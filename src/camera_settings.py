@@ -2,6 +2,7 @@
 
 The HAT appears as one camera with four views in a 2x2 composite. At the
 maximum composite size each view is 2328x1748, not the sensor's full 16MP.
+Keep that native composite intact; 16:9 framing is applied to individual views.
 """
 
 import shutil

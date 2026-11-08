@@ -112,7 +112,8 @@ class CalibrationTests(unittest.TestCase):
                 run_pipeline(str(image_path), str(base / "gifs"), "capture")
             with Image.open(base / "gifs" / "capture.gif") as gif:
                 self.assertEqual(gif.format, "GIF")
-                self.assertEqual(gif.size, (96, 128))
+                self.assertEqual(gif.size, (96, 54))
+                self.assertEqual(gif.width * 9, gif.height * 16)
                 gif.load()
 
 

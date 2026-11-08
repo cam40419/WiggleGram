@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 import config as cfg
+from framing import crop_to_aspect
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,10 @@ def wigglegram_anchors(
     shifted = [translate_image(images[i], shifts[i]) for i in range(len(images))]
     if crop_common:
         shifted = crop_to_common_valid_area(shifted, shifts)
+    # Crop each aligned view, not the HAT's composite: cropping the composite
+    # would remove different scene regions from its top and bottom cameras.
+    # Do this after the common-area crop so alignment cannot change the ratio.
+    shifted = [crop_to_aspect(frame) for frame in shifted]
 
     snake = shifted + shifted[-2:0:-1]
     pal0 = snake[0].convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
@@ -257,8 +262,8 @@ def wigglegram_anchors(
 
 def run_pipeline(raw_path: str, save_path: str, timestamp: str):
     """Full wigglegram processing pipeline."""
-    raw    = Image.open(raw_path)
-    pieces = split_grid(raw, 2, 2)
+    with Image.open(raw_path) as raw:
+        pieces = split_grid(raw, 2, 2)
     pieces = [p.transpose(Image.Transpose.ROTATE_90) for p in pieces]
     pieces = apply_rotation_calibration(pieces)
     pieces = apply_white_balance(pieces)
