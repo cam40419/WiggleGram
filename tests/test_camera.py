@@ -40,6 +40,12 @@ class CameraSettingsTests(unittest.TestCase):
         still, preview = data["still"], data["preview"]
         self.assertEqual(still[still.index("--width") + 1], "4656")
         self.assertEqual(still[still.index("--height") + 1], "3496")
+        self.assertEqual(still[still.index("--mode") + 1], "4656:3496:10")
+        self.assertEqual(still[still.index("--viewfinder-mode") + 1], "2328:1748:10")
+        self.assertEqual(preview[preview.index("--mode") + 1], "2328:1748:10")
+        for command in (still, preview):
+            self.assertEqual(command[command.index("--roi") + 1], "0,0,1,1")
+            self.assertEqual(command[command.index("--rotation") + 1], "0")
         self.assertEqual(still[still.index("--autofocus-mode") + 1], "auto")
         self.assertEqual(preview[preview.index("--autofocus-mode") + 1], "continuous")
         self.assertNotIn("--tuning-file", still)
@@ -65,6 +71,15 @@ class CameraSettingsTests(unittest.TestCase):
         result = self.configured_commands(WIGGLEGRAM_LENS_POSITION="1.0")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("WIGGLEGRAM_FOCUS_MODE=manual", result.stderr)
+
+    def test_old_16_by_9_stream_settings_cannot_silently_crop_the_composite(self):
+        for name, width, height in (("CAPTURE", "3840", "2160"), ("VF", "1280", "720")):
+            with self.subTest(stream=name):
+                result = self.configured_commands(**{
+                    f"WIGGLEGRAM_{name}_WIDTH": width, f"WIGGLEGRAM_{name}_HEIGHT": height,
+                })
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("full sensor aspect ratio", result.stderr)
 
     def test_camera_command_selection_supports_both_os_families(self):
         for kind in ("still", "vid"):

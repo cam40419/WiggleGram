@@ -39,7 +39,7 @@ from camera_settings import (
     VF_WIDTH, VF_HEIGHT, VF_FPS, SETTLE_MS, CAPTURE_TIMEOUT_S, still_command,
 )
 from viewfinder import MJPEGReader
-from framing import preview_view
+from framing import camera_views, preview_view
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 CALIB_OUT  = cfg.ROTATION_CALIBRATION_PATH
@@ -60,7 +60,7 @@ except Exception:
 
 
 def _extract_cam1(frame: Image.Image) -> Image.Image:
-    """Match the app's rotated, 16:9 top-right viewfinder."""
+    """Match the app's full upright top-right viewfinder."""
     return preview_view(frame)
 
 
@@ -91,10 +91,9 @@ def split_grid(img: Image.Image, rows: int, cols: int):
 
 
 def load_camera_images(raw_path: Path):
-    """Reproduce the first two pipeline steps: split 2×2 grid, rotate each 90° CW."""
-    raw = Image.open(raw_path).convert("RGB")
-    pieces = split_grid(raw, 2, 2)
-    return [p.rotate(90, expand=True) for p in pieces]
+    """Load full camera views with exactly 90 degrees counterclockwise rotation."""
+    with Image.open(raw_path) as raw:
+        return camera_views(raw.convert("RGB"))
 
 
 def best_rotation_from_corners(pts: list) -> float:

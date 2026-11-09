@@ -8,14 +8,14 @@ from typing import List, Optional
 
 import tkinter as tk
 import tkinter.ttk as ttk
-import numpy as np
-from PIL import Image, ImageTk, ImageFile, ImageDraw, ImageFont
+from PIL import Image, ImageTk, ImageFile
 
 import config as cfg
 from camera import do_capture, SHUTTER_US
 from camera_settings import VF_WIDTH, VF_HEIGHT, VF_FPS
 from gif_utils import load_gif_frames
-from framing import preview_view
+from framing import camera_views, preview_view
+from overlays import ViewfinderOverlay, ui_scale
 from pipeline import run_pipeline
 from viewfinder import MJPEGReader
 
@@ -33,12 +33,6 @@ logger = logging.getLogger(__name__)
 logger.info(f"Logging to {LOG_FILE}")
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-# UI Configuration
-CROSSHAIR_LEN  = 30
-CROSSHAIR_GAP  = 6
-CROSSHAIR_CLR  = (255, 255, 255)
-CROSSHAIR_SHD  = (0, 0, 0)
 
 # GPIO setup
 SHUTTER_PIN = 5
@@ -71,6 +65,8 @@ class WiggleApp:
         root.update_idletasks()
         self.screen_w = root.winfo_screenwidth()
         self.screen_h = root.winfo_screenheight()
+        self._ui_scale = ui_scale((self.screen_w, self.screen_h))
+        self._bar_height = max(28, round(34 * self._ui_scale))
 
         # Canvas
         self.canvas = tk.Canvas(
@@ -80,33 +76,32 @@ class WiggleApp:
         self.canvas.pack(fill="both", expand=True)
 
         # Bottom bar: status label + progress bar
-        PROGRESS_H = 48
-        self._bar_frame = tk.Frame(root, bg="black", height=PROGRESS_H)
+        self._bar_frame = tk.Frame(root, bg="black", height=self._bar_height)
         self._bar_frame.place(
-            x=0, y=self.screen_h - PROGRESS_H,
-            width=self.screen_w, height=PROGRESS_H
+            x=0, y=self.screen_h - self._bar_height,
+            width=self.screen_w, height=self._bar_height
         )
         self.status_var = tk.StringVar(value="Ready")
         self.status_lbl = tk.Label(
             self._bar_frame, textvariable=self.status_var,
-            font=("Helvetica", 16), fg="white", bg="black"
+            font=("Helvetica", -max(9, round(12 * self._ui_scale))), fg="white", bg="black"
         )
-        self.status_lbl.pack(side="top", pady=(4, 0))
+        self.status_lbl.pack(side="top", pady=(2, 0))
 
         style = ttk.Style(root)
         style.theme_use("default")
         style.configure(
             "Wiggle.Horizontal.TProgressbar",
             troughcolor="#333333", background="#ffffff",
-            thickness=10,
+            thickness=max(3, round(5 * self._ui_scale)),
         )
         self._progress = ttk.Progressbar(
             self._bar_frame, style="Wiggle.Horizontal.TProgressbar",
             orient="horizontal", mode="indeterminate",
-            length=self.screen_w - 40,
+            length=self.screen_w - 20,
         )
         # hidden until processing starts
-        self._progress.pack(side="top", padx=20, pady=(2, 4))
+        self._progress.pack(side="top", padx=10, pady=(1, 2))
         self._progress.pack_forget()
         
         # Hide status bar initially (viewfinder mode)
@@ -118,12 +113,7 @@ class WiggleApp:
         )
         self._current_tk_img: Optional[ImageTk.PhotoImage] = None
         
-        # Cache fonts for overlay performance
-        self._fonts_loaded = False
-        self._font_large = None
-        self._font_med = None
-        self._font_small = None
-        self._load_fonts()
+        self._overlay = ViewfinderOverlay()
         
         # Cache disk usage (update every 60 frames)
         self._disk_usage_cache = "--GB"
@@ -155,32 +145,8 @@ class WiggleApp:
         root.bind("<Escape>", lambda _e: self._quit())
 
         # Start viewfinder poll
-        self._poll_viewfinder()    
-    def _load_fonts(self):
-        """Load fonts once at startup for better performance."""
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        ]
-        
-        for font_path in font_paths:
-            try:
-                self._font_large = ImageFont.truetype(font_path, 40)
-                self._font_med = ImageFont.truetype(font_path, 28)
-                self._font_small = ImageFont.truetype(font_path, 24)
-                self._fonts_loaded = True
-                logger.info(f"Loaded fonts from: {font_path}")
-                return
-            except:
-                continue
-        
-        # Fallback to default
-        self._font_large = ImageFont.load_default()
-        self._font_med = ImageFont.load_default()
-        self._font_small = ImageFont.load_default()
-        logger.warning("Using default bitmap font")
+        self._poll_viewfinder()
+
     # GPIO callback (runs in GPIO thread – must be thread-safe)
     def _gpio_shutter_cb(self, channel):
         self.root.after(0, self._shutter_pressed)
@@ -192,10 +158,10 @@ class WiggleApp:
         elif self.state == self.STATE_GIF:
             self._return_to_viewfinder()
 
-    # Extract camera 1 and show the same 16:9 framing as the output.
+    # Show the complete camera view, rotated 90 degrees counterclockwise.
     @staticmethod
     def _extract_cam1(frame: Image.Image) -> Image.Image:
-        """Extract the top-right view, rotate 90° CCW, and center-crop to 16:9."""
+        """Extract the full top-right view and rotate 90° CCW."""
         return preview_view(frame)
 
     # Viewfinder poll (runs every 33 ms on tkinter main thread)
@@ -205,53 +171,13 @@ class WiggleApp:
                 frame = self._frame_queue.get_nowait()
                 cam1  = self._extract_cam1(frame)
                 self._last_vf_frame = cam1
-                # Combine drawing operations on single mutable image
-                cam1 = self._draw_all_overlays(cam1)
-                self._show_pil(cam1)
+                self._show_pil(cam1, overlays=True)
             except queue.Empty:
                 pass  # no new frame yet
         self.root.after(33, self._poll_viewfinder)
 
-    # Combined drawing operation for better performance
     def _draw_all_overlays(self, img: Image.Image) -> Image.Image:
-        """Draw crosshair and camera info in single pass for performance."""
-        # Convert to numpy for crosshair, then to PIL for text (single conversion)
-        arr = np.asarray(img).copy()
-        w, h = arr.shape[1], arr.shape[0]
-        
-        # Draw crosshair directly on numpy array
-        cx, cy = w // 2, h // 2
-        g = CROSSHAIR_GAP
-        L = CROSSHAIR_LEN
-        t = 2
-        
-        # Horizontal lines
-        arr[cy - t:cy + t, cx - L:cx - g] = CROSSHAIR_SHD
-        arr[cy - t + 1:cy + t - 1, cx - L + 1:cx - g - 1] = CROSSHAIR_CLR
-        arr[cy - t:cy + t, cx + g:cx + L] = CROSSHAIR_SHD
-        arr[cy - t + 1:cy + t - 1, cx + g + 1:cx + L - 1] = CROSSHAIR_CLR
-        
-        # Vertical lines
-        arr[cy - L:cy - g, cx - t:cx + t] = CROSSHAIR_SHD
-        arr[cy - L + 1:cy - g - 1, cx - t + 1:cx + t - 1] = CROSSHAIR_CLR
-        arr[cy + g:cy + L, cx - t:cx + t] = CROSSHAIR_SHD
-        arr[cy + g + 1:cy + L - 1, cx - t + 1:cx + t - 1] = CROSSHAIR_CLR
-        
-        # Convert to PIL for text overlay
-        img = Image.fromarray(arr)
-        draw = ImageDraw.Draw(img)
-        
-        # Optimized text shadow (only 2 offsets instead of 24)
-        def draw_text_shadow(xy, text, font, fill=(255, 255, 255)):
-            x, y = xy
-            # Simple shadow: 2 passes instead of 25
-            draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0))
-            draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0))
-            draw.text((x, y), text, font=font, fill=fill)
-        
-        # Top-left: Mode
-        draw_text_shadow((20, 20), "WIGGLEGRAM", self._font_large, fill=(255, 200, 0))
-        
+        """Fit the whole view and draw compact graphics in final display pixels."""
         # Update disk usage cache every 60 frames (~4 seconds at 15fps)
         self._disk_usage_counter += 1
         if self._disk_usage_counter >= 60:
@@ -260,48 +186,22 @@ class WiggleApp:
                 disk = shutil.disk_usage(cfg.OUTPUT_DIR)
                 gb_free = disk.free / (1024**3)
                 self._disk_usage_cache = f"{gb_free:.1f}GB"
-            except:
+            except OSError:
                 self._disk_usage_cache = "--GB"
-        
-        # Top-right: Time and storage
-        current_time = datetime.now().strftime("%H:%M:%S")
-        time_text = f"{current_time}  {self._disk_usage_cache}"
-        bbox = draw.textbbox((0, 0), time_text, font=self._font_med)
-        text_w = bbox[2] - bbox[0]
-        draw_text_shadow((w - text_w - 20, 20), time_text, self._font_med)
-        
-        # Bottom-left: Camera settings
-        shutter_speed = SHUTTER_US / 1_000_000
-        shutter_text = f"{shutter_speed:.1f}s" if shutter_speed >= 1 else f"1/{int(1/shutter_speed)}"
-        
-        y_offset = h - 104  # Pre-calculated offset for 3 lines
-        draw_text_shadow((20, y_offset), f"SS: {shutter_text}", self._font_small)
-        draw_text_shadow((20, y_offset + 28), "EV: +0.5", self._font_small)
-        draw_text_shadow((20, y_offset + 56), "AWB: Auto", self._font_small)
-        
-        # Bottom-right: Resolution and FPS
-        y_offset = h - 76  # Pre-calculated offset for 2 lines
-        res_text = f"{w}×{h}  16:9"
-        fps_text = f"{VF_FPS} FPS"
-        
-        bbox = draw.textbbox((0, 0), res_text, font=self._font_small)
-        text_w = bbox[2] - bbox[0]
-        draw_text_shadow((w - text_w - 20, y_offset), res_text, self._font_small)
-        
-        bbox = draw.textbbox((0, 0), fps_text, font=self._font_small)
-        text_w = bbox[2] - bbox[0]
-        draw_text_shadow((w - text_w - 20, y_offset + 28), fps_text, self._font_small)
-        
-        return img
+        return self._overlay.render(
+            img, (self.screen_w, self.screen_h), shutter_us=SHUTTER_US,
+            fps=VF_FPS, storage=self._disk_usage_cache,
+            clock=datetime.now().strftime("%H:%M:%S"),
+        )
 
     # Scale a PIL image to fit the screen and push to canvas
-    def _show_pil(self, img: Image.Image):
-        sw, sh = self.screen_w, self.screen_h
-        img_w, img_h = img.size
-        scale = min(sw / img_w, sh / img_h)
-        new_w, new_h = int(img_w * scale), int(img_h * scale)
-        # Use BILINEAR for faster rendering (LANCZOS is slower but higher quality)
-        img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+    def _show_pil(self, img: Image.Image, *, overlays: bool = False):
+        if overlays:
+            img = self._draw_all_overlays(img)
+        else:
+            scale = min(self.screen_w / img.width, self.screen_h / img.height)
+            size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
+            img = img.resize(size, Image.Resampling.BILINEAR)
         tk_img = ImageTk.PhotoImage(img)
         self.canvas.itemconfig(self._canvas_img_id, image=tk_img)
         self._current_tk_img = tk_img   # prevent GC
@@ -312,17 +212,16 @@ class WiggleApp:
         self.status_var.set("Capturing…")
         
         # Show status bar during capture
-        PROGRESS_H = 48
         self._bar_frame.place(
-            x=0, y=self.screen_h - PROGRESS_H,
-            width=self.screen_w, height=PROGRESS_H
+            x=0, y=self.screen_h - self._bar_height,
+            width=self.screen_w, height=self._bar_height
         )
 
         # Stop the MJPEG viewfinder to free the camera
         self._mjpeg.stop()
         # Show last frozen frame while camera re-initialises
         if self._last_vf_frame:
-            self._show_pil(self._draw_all_overlays(self._last_vf_frame))
+            self._show_pil(self._last_vf_frame, overlays=True)
 
         def capture_thread():
             input_file, output_dir = do_capture()
@@ -336,8 +235,8 @@ class WiggleApp:
     # Build 4-up composite from raw 2×2 capture
     @staticmethod
     def _build_4up(raw: Image.Image, target_w: int, target_h: int) -> Image.Image:
-        """Show the four rotated camera views with the output's 16:9 framing."""
-        rotated = [preview_view(raw, camera_index) for camera_index in range(4)]
+        """Show all four complete, counterclockwise-rotated camera views."""
+        rotated = camera_views(raw)
         # Lay the framed views side by side.
         cell_w = target_w // 4
         cell_h = target_h
@@ -359,13 +258,13 @@ class WiggleApp:
         try:
             raw = Image.open(str(input_file)).convert("RGB")
             # Reserve bottom bar space
-            composite = self._build_4up(raw, self.screen_w, self.screen_h - 60)
+            composite = self._build_4up(raw, self.screen_w, self.screen_h - self._bar_height - 8)
             self._show_pil(composite)
         except Exception as exc:
             logger.warning("4-up preview failed: %s", exc)
 
         # Show and start the indeterminate progress bar
-        self._progress.pack(side="top", padx=20, pady=(2, 4))
+        self._progress.pack(side="top", padx=10, pady=(1, 2))
         self._progress.start(20)   # step every 20 ms
 
         def process_thread():

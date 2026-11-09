@@ -5,10 +5,11 @@ hardware is a Raspberry Pi 4B, an Arducam UC-512 CamArray HAT, and four Arducam
 UC-873 (Sony IMX519, 16MP) modules compatible with the CamArray kit.
 
 The application expects the HAT's **four-in-one, 2x2 composite**: camera 0 at
-top-left, 1 at top-right, 2 at bottom-left, and 3 at bottom-right. Each quadrant
-is rotated 90 degrees counterclockwise for the existing physical mounting.
-The viewfinder displays camera 1 with the same 16:9 framing as the GIF. The
-physical shutter uses BCM GPIO 5 and the flash uses BCM GPIO 26.
+top-left, 1 at top-right, 2 at bottom-left, and 3 at bottom-right. Every quadrant
+is rotated **exactly 90 degrees counterclockwise** for the physical mounting.
+Capture processing, preview, batch processing, and calibration use that same
+orientation. The viewfinder fits the entire upright view from camera 1 onto
+the screen. The physical shutter uses BCM GPIO 5 and the flash uses BCM GPIO 26.
 
 The maximum composite is **4656x3496**, with **2328x1748 per view**. Full 16MP
 per camera requires sequential single-channel capture, which this application
@@ -16,14 +17,21 @@ does not implement. Arducam also documents a one-frame offset between camera
 pair 0/1 and pair 2/3 in quad mode; check moving subjects and flash coverage on
 the rig. See [Arducam's quad-camera specifications](https://www.arducam.com/arducam-16mp-imx519-autofocus-synchronized-quad-camera-kit-for-raspberry-pi-nvidia-jetson.html).
 
-Captures retain that full native composite; the GIF uses the **largest exact
-16:9 crop** of each aligned view without resampling. With the existing 90-degree
-camera mounting, a view becomes 1748x2328 before cropping, giving up to
-**1744x981 per GIF frame**. Alignment can reduce that size to remove exposed
-edges, while preserving 16:9. Preview uses the same center framing at a lower
-stream resolution. Cropping happens after splitting the four cameras, so the
-top and bottom views retain matching framing. Calibration profiles continue
-to use the full, uncropped views.
+Captures retain the full native composite. After the 90-degree rotation, each
+camera contributes its complete **1748x2328** view. The **16:9 GIF adds black
+borders instead of cropping or enlarging that view**. With no alignment shift,
+the output canvas is 4144x2331; all 1748x2328 camera pixels remain at their
+original scale. Alignment and tilt correction expand their canvases to retain
+the edges, so output dimensions can grow. The former 1744x981 center crop has
+been removed because it discarded most of the portrait view's height.
+
+Stills explicitly request `--mode 4656:3496:10`. Preview requests the
+`2328:1748:10` binned mode; both cover the full active sensor area in the
+[IMX519 driver](https://github.com/raspberrypi/linux/blob/rpi-6.12.y/drivers/media/i2c/imx519.c).
+Both commands use `--roi 0,0,1,1`. Cropped 16:9 sensor modes are not selected.
+The preview stream is scaled down for display, while still captures retain
+the maximum combined resolution. Preview text and crosshair are drawn after
+display scaling, so changing stream resolution does not enlarge the UI.
 
 ## Set up the Pi 4B
 
@@ -67,7 +75,8 @@ After reboot, check detection and take a test image:
 
 ```sh
 python3 scripts/setup_imx519.py --check
-rpicam-still --camera 0 --nopreview --width 4656 --height 3496 \
+rpicam-still --camera 0 --nopreview --mode 4656:3496:10 --roi 0,0,1,1 \
+    --width 4656 --height 3496 \
     --autofocus-mode auto -t 2000 -o quad-test.jpg
 ```
 
@@ -99,6 +108,19 @@ a different existing media location.
 Edit `.env` and restart the app. Preview defaults to 1164x874 at a requested
 15 FPS; actual FPS depends on the selected sensor mode and HAT. Still capture,
 preview, and calibration share the settings in `src/camera_settings.py`.
+
+Keep these values for maximum still resolution and an uncropped preview:
+
+```ini
+WIGGLEGRAM_CAPTURE_WIDTH=4656
+WIGGLEGRAM_CAPTURE_HEIGHT=3496
+WIGGLEGRAM_VF_WIDTH=1164
+WIGGLEGRAM_VF_HEIGHT=874
+```
+
+Composite dimensions must keep the sensor's native aspect ratio. Set the
+output's 16:9 shape by adding borders after the views are split, rather than
+by requesting a 16:9 composite or cropping an upright camera view.
 
 By default the preview uses continuous autofocus; stills focus once at startup
 before the capture signal. Increase `WIGGLEGRAM_SETTLE_MS` if focus or white

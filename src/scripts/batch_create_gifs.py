@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PIL import Image
 import config as cfg
+from framing import camera_views
 from pipeline import (
-    split_grid,
     apply_rotation_calibration,
     apply_white_balance,
     apply_color_correction,
@@ -64,24 +64,19 @@ def process_image(image_path: Path, output_dir: Path):
         raw = Image.open(image_path).convert("RGB")
         logger.debug(f"Loaded image: {raw.size}")
         
-        # Split into 2x2 grid (4 pieces)
-        pieces = split_grid(raw, 2, 2)
+        # Split into full views and rotate each exactly 90 degrees CCW.
+        pieces = camera_views(raw)
         logger.debug(f"Split into {len(pieces)} pieces")
         
-        # Rotate each piece 90 degrees
-        pieces = [p.transpose(Image.Transpose.ROTATE_90) for p in pieces]
-        
         # Apply calibrations if available
-        pieces = apply_rotation_calibration(pieces)
         pieces = apply_white_balance(pieces)
+        pieces = apply_rotation_calibration(pieces)
         # Optionally enable color correction
         pieces = apply_color_correction(pieces)
         
-        # Ensure all pieces are the same size
+        # Expanded rotation corrections can have different sizes. Alignment
+        # retains those pixels on a shared canvas instead of rescaling them.
         base_w, base_h = pieces[0].size
-        pieces = [img.resize((base_w, base_h), Image.Resampling.BILINEAR) 
-                  if img.size != (base_w, base_h) else img 
-                  for img in pieces]
         
         # Pick anchor points for alignment
         target_xy = (base_w // 2, base_h // 2)
@@ -102,7 +97,7 @@ def process_image(image_path: Path, output_dir: Path):
             target_xy=target_xy,
             axis="x",
             duration_ms=100,
-            crop_common=True,
+            crop_common=False,
         )
         
         logger.info(f"✓ Created GIF: {output_dir / f'{gif_filename}.gif'}")

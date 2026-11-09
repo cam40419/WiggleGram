@@ -2,7 +2,7 @@
 
 The HAT appears as one camera with four views in a 2x2 composite. At the
 maximum composite size each view is 2328x1748, not the sensor's full 16MP.
-Keep that native composite intact; 16:9 framing is applied to individual views.
+Keep that native composite intact; 16:9 output uses borders to retain each view.
 """
 
 import shutil
@@ -20,6 +20,11 @@ def _positive_int(key: str, default: int) -> int:
 
 
 CAMERA_INDEX = int(cfg.get_env_var("WIGGLEGRAM_CAMERA_INDEX", "0"))
+# Both readouts cover the full sensor area. The smaller one is binned, not a
+# 16:9 sensor crop. Explicit modes prevent automatic selection of a cropped mode.
+SENSOR_WIDTH, SENSOR_HEIGHT = 4656, 3496
+CAPTURE_SENSOR_MODE = "4656:3496:10"
+VF_SENSOR_MODE = "2328:1748:10"
 CAPTURE_WIDTH = _positive_int("WIGGLEGRAM_CAPTURE_WIDTH", 4656)
 CAPTURE_HEIGHT = _positive_int("WIGGLEGRAM_CAPTURE_HEIGHT", 3496)
 VF_WIDTH = _positive_int("WIGGLEGRAM_VF_WIDTH", 1164)
@@ -37,6 +42,12 @@ if CAMERA_INDEX < 0:
     raise ValueError("WIGGLEGRAM_CAMERA_INDEX must be non-negative")
 if any(size % 2 for size in (CAPTURE_WIDTH, CAPTURE_HEIGHT, VF_WIDTH, VF_HEIGHT)):
     raise ValueError("Composite capture and viewfinder dimensions must be even")
+for width, height, name in ((CAPTURE_WIDTH, CAPTURE_HEIGHT, "CAPTURE"), (VF_WIDTH, VF_HEIGHT, "VF")):
+    if abs(width / height - SENSOR_WIDTH / SENSOR_HEIGHT) > 0.01:
+        raise ValueError(f"WIGGLEGRAM_{name}_WIDTH/HEIGHT must retain the full sensor aspect ratio "
+                         "(4656x3496 for capture, 1164x874 for preview); 16:9 is added after splitting.")
+if CAPTURE_WIDTH > SENSOR_WIDTH or CAPTURE_HEIGHT > SENSOR_HEIGHT:
+    raise ValueError("Capture dimensions must not exceed the native 4656x3496 resolution")
 if CAPTURE_TIMEOUT_S <= 0 or FLASH_OFFSET_S < 0:
     raise ValueError("Capture timeout must be positive and flash offset non-negative")
 if FOCUS_MODE not in ("auto", "manual", "continuous"):
@@ -61,6 +72,7 @@ def _camera_arguments(*, preview: bool = False, camera: Optional[int] = None) ->
     # before SIGUSR1. Capture-time AF would change the existing flash timing.
     focus = "continuous" if preview and FOCUS_MODE == "auto" else FOCUS_MODE
     args = ["--camera", str(CAMERA_INDEX if camera is None else camera),
+            "--roi", "0,0,1,1", "--rotation", "0",
             "--awb", "auto", "--autofocus-mode", focus]
     if LENS_POSITION:
         args += ["--lens-position", LENS_POSITION]
@@ -76,6 +88,9 @@ def still_command(output: Path, *, signal_capture: bool = False,
     args = [executable or camera_executable("still"),
             "-o", str(output), "--nopreview", "--quality", "100",
             "--width", str(CAPTURE_WIDTH), "--height", str(CAPTURE_HEIGHT),
+            "--mode", CAPTURE_SENSOR_MODE,
+            "--viewfinder-mode", VF_SENSOR_MODE,
+            "--viewfinder-width", str(VF_WIDTH), "--viewfinder-height", str(VF_HEIGHT),
             "--denoise", "cdn_hq", "--sharpness", "1.5", "--ev", "0.5"]
     args += _camera_arguments()
     args += ["-t", "0" if signal_capture else str(SETTLE_MS)]
@@ -88,7 +103,9 @@ def still_command(output: Path, *, signal_capture: bool = False,
 
 def viewfinder_command(*, camera: Optional[int] = None, width: int = VF_WIDTH,
                        height: int = VF_HEIGHT, fps: int = VF_FPS) -> list:
+    mode = VF_SENSOR_MODE if width <= 2328 and height <= 1748 else CAPTURE_SENSOR_MODE
     return [camera_executable("vid"), "-t", "0", "--codec", "mjpeg", "-o", "-",
+            "--mode", mode,
             "--width", str(width), "--height", str(height),
             "--framerate", str(fps), "--nopreview"] + _camera_arguments(
                 preview=True, camera=camera)

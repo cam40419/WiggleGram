@@ -13,6 +13,7 @@ from PIL import Image, ImageFile, ImageOps
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config as cfg
 from camera_settings import still_command
+from framing import camera_views
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -52,15 +53,8 @@ def capture_image() -> Path:
 
 
 def split_and_rotate(raw: Image.Image) -> list[Image.Image]:
-    """Split 2×2 grid and rotate 90° CW — matches a_better_hope.py."""
-    w, h = raw.size
-    pw, ph = w // 2, h // 2
-    pieces = []
-    for r in range(2):
-        for c in range(2):
-            crop = raw.crop((c * pw, r * ph, (c + 1) * pw, (r + 1) * ph))
-            pieces.append(crop.rotate(90, expand=True))
-    return pieces
+    """Use the pipeline's full views with exactly 90 degrees CCW rotation."""
+    return camera_views(raw)
 
 
 # Spatial gain map computation

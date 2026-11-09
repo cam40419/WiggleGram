@@ -19,7 +19,7 @@ from calibrate import (
     color_correct, combine_calibrations, distortion_calibrate,
     rotation_calibrate, wb_calibrate,
 )
-from pipeline import apply_white_balance, run_pipeline, split_grid
+from pipeline import apply_rotation_calibration, apply_white_balance, run_pipeline, split_grid
 
 
 class CalibrationTests(unittest.TestCase):
@@ -52,6 +52,8 @@ class CalibrationTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--height") + 1], str(settings.CAPTURE_HEIGHT))
                 self.assertEqual(command[command.index("--camera") + 1], str(settings.CAMERA_INDEX))
                 self.assertEqual(command[command.index("--autofocus-mode") + 1], settings.FOCUS_MODE)
+                self.assertEqual(command[command.index("--mode") + 1], "4656:3496:10")
+                self.assertEqual(command[command.index("--roi") + 1], "0,0,1,1")
                 self.assertNotIn("imx219_noir.json", " ".join(command))
 
     def test_new_white_balance_profile_is_consumed_by_the_pipeline(self):
@@ -87,6 +89,32 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual([piece.size for piece in pieces], [(2328, 1748)] * 4)
         self.assertEqual(pieces[0].transpose(Image.Transpose.ROTATE_90).size, (1748, 2328))
 
+    def test_calibration_views_all_use_counterclockwise_rotation(self):
+        pixels = np.random.default_rng(12).integers(0, 256, (48, 64, 3), dtype=np.uint8)
+        raw = Image.fromarray(np.tile(pixels, (2, 2, 1)))
+        expected = np.rot90(pixels)
+        for load_views in (wb_calibrate.split_and_rotate, color_correct.split_and_rotate):
+            for view in load_views(raw):
+                np.testing.assert_array_equal(np.asarray(view), expected)
+        for camera in range(4):
+            np.testing.assert_array_equal(distortion_calibrate.rotate_piece_for_camera(pixels, camera), expected)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "quad.png"
+            raw.save(path)
+            for view in rotation_calibrate.load_camera_images(path):
+                np.testing.assert_array_equal(np.asarray(view), expected)
+
+    def test_tilt_correction_expands_the_view_instead_of_cropping_corners(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "rotation.npz"
+            np.savez(profile, angles=[15.0])
+            view = Image.new("RGB", (100, 150), "white")
+            with patch.object(cfg, "ROTATION_CALIBRATION_PATH", profile):
+                corrected = apply_rotation_calibration([view])[0]
+            self.assertGreater(corrected.width, view.width)
+            self.assertGreater(corrected.height, view.height)
+            self.assertGreater(np.asarray(corrected, dtype=float).sum() / (3 * 255), 14800)
+
     def test_combining_profiles_does_not_reimport_the_previous_combined_file(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -112,7 +140,7 @@ class CalibrationTests(unittest.TestCase):
                 run_pipeline(str(image_path), str(base / "gifs"), "capture")
             with Image.open(base / "gifs" / "capture.gif") as gif:
                 self.assertEqual(gif.format, "GIF")
-                self.assertEqual(gif.size, (96, 54))
+                self.assertEqual(gif.size, (240, 135))
                 self.assertEqual(gif.width * 9, gif.height * 16)
                 gif.load()
 

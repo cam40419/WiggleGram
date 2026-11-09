@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 import config as cfg
-from framing import crop_to_aspect
+from framing import camera_views, pad_to_aspect
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def apply_rotation_calibration(images: List[Image.Image]) -> List[Image.Image]:
             corrected.append(im.rotate(
                 float(angles[idx]),
                 resample=Image.Resampling.BICUBIC,
-                expand=False,
+                expand=True,
             ))
             logger.info("Rotation calibration applied to camera %d: %.4f°", idx, angles[idx])
     return corrected
@@ -209,6 +209,22 @@ def crop_to_common_valid_area(
     return [fr.crop((x0, y0, x1, y1)) for fr in frames]
 
 
+def align_full_views(images: List[Image.Image], shifts: List[Tuple[int, int]]) -> List[Image.Image]:
+    """Align on an expanded canvas, retaining every source pixel at its scale."""
+    if len(images) != len(shifts) or not images:
+        raise ValueError("Each camera view must have one alignment shift")
+    left = min(dx for dx, _ in shifts)
+    top = min(dy for _, dy in shifts)
+    right = max(dx + image.width for image, (dx, _) in zip(images, shifts))
+    bottom = max(dy + image.height for image, (_, dy) in zip(images, shifts))
+    aligned = []
+    for image, (dx, dy) in zip(images, shifts):
+        canvas = Image.new("RGB", (right - left, bottom - top), "black")
+        canvas.paste(image, (dx - left, dy - top))
+        aligned.append(canvas)
+    return aligned
+
+
 def wigglegram_anchors(
     images: List[Image.Image],
     *,
@@ -218,7 +234,7 @@ def wigglegram_anchors(
     target_xy: Optional[Tuple[int, int]] = None,
     axis: AxisType = "x",
     duration_ms: int = 100,
-    crop_common: bool = True,
+    crop_common: bool = False,
 ):
     """Generate a wigglegram GIF from aligned images using anchor points."""
     if not images:
@@ -227,8 +243,10 @@ def wigglegram_anchors(
     out_path = os.path.join(save_dir, f"{filename}.gif")
 
     base_w, base_h = images[0].size
-    if any(im.size != (base_w, base_h) for im in images):
-        images = [im.resize((base_w, base_h), Image.Resampling.BILINEAR) for im in images]
+    if crop_common and any(im.size != (base_w, base_h) for im in images):
+        raise ValueError("Camera views must have matching native dimensions; refusing to rescale them")
+    if len(anchors) != len(images):
+        raise ValueError("Each camera view must have one anchor")
 
     tx, ty = target_xy if target_xy else (base_w // 2, base_h // 2)
     shifts: List[Tuple[int, int]] = []
@@ -242,13 +260,14 @@ def wigglegram_anchors(
                 0 if axis == "x" else int(round(ty - ay)),
             ))
 
-    shifted = [translate_image(images[i], shifts[i]) for i in range(len(images))]
     if crop_common:
+        shifted = [translate_image(images[i], shifts[i]) for i in range(len(images))]
         shifted = crop_to_common_valid_area(shifted, shifts)
-    # Crop each aligned view, not the HAT's composite: cropping the composite
-    # would remove different scene regions from its top and bottom cameras.
-    # Do this after the common-area crop so alignment cannot change the ratio.
-    shifted = [crop_to_aspect(frame) for frame in shifted]
+    else:
+        shifted = align_full_views(images, shifts)
+    # Preserve the full upright field of view. A 16:9 container needs borders;
+    # cutting a portrait view to fill it would discard most of the scene height.
+    shifted = [pad_to_aspect(frame) for frame in shifted]
 
     snake = shifted + shifted[-2:0:-1]
     pal0 = snake[0].convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
@@ -263,10 +282,9 @@ def wigglegram_anchors(
 def run_pipeline(raw_path: str, save_path: str, timestamp: str):
     """Full wigglegram processing pipeline."""
     with Image.open(raw_path) as raw:
-        pieces = split_grid(raw, 2, 2)
-    pieces = [p.transpose(Image.Transpose.ROTATE_90) for p in pieces]
-    pieces = apply_rotation_calibration(pieces)
+        pieces = camera_views(raw)
     pieces = apply_white_balance(pieces)
+    pieces = apply_rotation_calibration(pieces)
     # pieces = apply_color_correction(pieces)
 
     w, h      = pieces[0].size
@@ -275,5 +293,5 @@ def run_pipeline(raw_path: str, save_path: str, timestamp: str):
     # save_anchor_debug(pieces, anchors, save_path)
     wigglegram_anchors(
         pieces, anchors=anchors, save_dir=save_path, filename=timestamp,
-        target_xy=target_xy, axis="x", duration_ms=100, crop_common=True,
+        target_xy=target_xy, axis="x", duration_ms=100, crop_common=False,
     )
