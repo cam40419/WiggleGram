@@ -6,9 +6,9 @@ UC-873 (Sony IMX519, 16MP) modules compatible with the CamArray kit.
 
 The application expects the HAT's **four-in-one, 2x2 composite**: camera 0 at
 top-left, 1 at top-right, 2 at bottom-left, and 3 at bottom-right. Every quadrant
-is rotated **exactly 90 degrees counterclockwise** for the physical mounting.
-Capture processing, preview, batch processing, and calibration use that same
-orientation. The viewfinder fits the entire upright view from camera 1 onto
+retains its **original sensor orientation, with no rotation**. Capture
+processing, preview, batch processing, and calibration use that same orientation.
+The viewfinder fits the entire view from camera 1 onto
 the screen. The physical shutter uses BCM GPIO 5 and the flash uses BCM GPIO 26.
 
 The maximum composite is **4656x3496**, with **2328x1748 per view**. Full 16MP
@@ -17,13 +17,11 @@ does not implement. Arducam also documents a one-frame offset between camera
 pair 0/1 and pair 2/3 in quad mode; check moving subjects and flash coverage on
 the rig. See [Arducam's quad-camera specifications](https://www.arducam.com/arducam-16mp-imx519-autofocus-synchronized-quad-camera-kit-for-raspberry-pi-nvidia-jetson.html).
 
-Captures retain the full native composite. After the 90-degree rotation, each
-camera contributes its complete **1748x2328** view. The **16:9 GIF adds black
-borders instead of cropping or enlarging that view**. With no alignment shift,
-the output canvas is 4144x2331; all 1748x2328 camera pixels remain at their
-original scale. Alignment and tilt correction expand their canvases to retain
-the edges, so output dimensions can grow. The former 1744x981 center crop has
-been removed because it discarded most of the portrait view's height.
+Captures retain the full native composite. Each camera contributes its complete
+**2328x1748** unrotated view. The **16:9 GIF adds black borders instead of
+cropping or enlarging that view**. With no alignment shift, the output canvas
+is 3120x1755; all 2328x1748 camera pixels remain at their original scale.
+Alignment expands the canvas to retain the edges, so output dimensions can grow.
 
 Stills explicitly request `--mode 4656:3496:10`. Preview requests the
 `2328:1748:10` binned mode; both cover the full active sensor area in the
@@ -109,6 +107,13 @@ Edit `.env` and restart the app. Preview defaults to 1164x874 at a requested
 15 FPS; actual FPS depends on the selected sensor mode and HAT. Still capture,
 preview, and calibration share the settings in `src/camera_settings.py`.
 
+All automatic view rotation is disabled, including saved rotation-calibration
+corrections. Old `WIGGLEGRAM_VIEW_ROTATION` values in existing `.env` files are
+ignored. The startup log confirms that the app retains native sensor orientation.
+Unrotated spatial calibration profiles use `src/calibrate/out/imx519/rotation_0/`
+so previous 90-degree gain maps are not reused. Recalibrate white balance for
+this orientation, or set `WIGGLEGRAM_CALIBRATION_DIR` to matching profiles.
+
 Keep these values for maximum still resolution and an uncropped preview:
 
 ```ini
@@ -140,20 +145,18 @@ not reuse the old IMX219 NoIR tuning file.
 
 ## Recalibrate the replacement modules
 
-Profiles now live in `src/calibrate/out/imx519/`, so old sensor profiles are
+Profiles now live in `src/calibrate/out/imx519/rotation_0/`, so old sensor profiles are
 not applied by default. Stop the app before running calibration captures:
 
 ```sh
 # Fill all four views with evenly lit white paper.
 .venv/bin/python src/calibrate/wb_calibrate.py
-
-# Use a straight reference edge to correct individual camera tilt.
-.venv/bin/python src/calibrate/rotation_calibrate.py
 ```
 
-Both commands also accept an existing composite JPEG as a positional argument.
-They save directly to the paths consumed by the pipeline. White balance and
-rotation corrections take effect on the next shot. ColorChecker calibration
+The command also accepts an existing composite JPEG as a positional argument
+and saves directly to the path consumed by the pipeline. White balance
+corrections take effect on the next shot. Saved rotation profiles are ignored.
+ColorChecker calibration
 (`src/calibrate/color_correct.py`) uses the same camera settings and profile
 directory; color correction remains optional in `src/pipeline.py`.
 

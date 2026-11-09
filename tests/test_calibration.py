@@ -19,7 +19,8 @@ from calibrate import (
     color_correct, combine_calibrations, distortion_calibrate,
     rotation_calibrate, wb_calibrate,
 )
-from pipeline import apply_rotation_calibration, apply_white_balance, run_pipeline, split_grid
+from framing import camera_views
+from pipeline import apply_white_balance, run_pipeline, split_grid
 
 
 class CalibrationTests(unittest.TestCase):
@@ -74,6 +75,21 @@ class CalibrationTests(unittest.TestCase):
                 means = np.asarray(image).mean(axis=(0, 1))
                 self.assertLess(np.ptp(means), 2)
 
+    def test_white_balance_calibration_does_not_apply_exif_rotation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            raw = base / "quad.jpg"
+            image = Image.new("RGB", (256, 192), "white")
+            exif = image.getexif()
+            exif[274] = 6  # Metadata requests a 90-degree turn; preserve sensor orientation.
+            image.save(raw, exif=exif)
+            profile = base / "white_balance_profile.npz"
+            with patch.object(wb_calibrate, "PROFILE_DIR", base), \
+                    patch.object(wb_calibrate, "PROFILE_PATH", profile):
+                wb_calibrate.calibrate(raw)
+            with np.load(profile) as saved:
+                self.assertEqual(saved["gain_maps"].shape, (4, 12, 16, 3))
+
     def test_rotation_save_creates_the_new_profile_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory) / "new modules" / "rotation_calibration.npz"
@@ -87,12 +103,12 @@ class CalibrationTests(unittest.TestCase):
         raw = Image.new("RGB", (4656, 3496))
         pieces = split_grid(raw, 2, 2)
         self.assertEqual([piece.size for piece in pieces], [(2328, 1748)] * 4)
-        self.assertEqual(pieces[0].transpose(Image.Transpose.ROTATE_90).size, (1748, 2328))
+        self.assertEqual([view.size for view in camera_views(raw)], [(2328, 1748)] * 4)
 
-    def test_calibration_views_all_use_counterclockwise_rotation(self):
+    def test_all_calibration_views_retain_native_sensor_orientation(self):
         pixels = np.random.default_rng(12).integers(0, 256, (48, 64, 3), dtype=np.uint8)
         raw = Image.fromarray(np.tile(pixels, (2, 2, 1)))
-        expected = np.rot90(pixels)
+        expected = pixels
         for load_views in (wb_calibrate.split_and_rotate, color_correct.split_and_rotate):
             for view in load_views(raw):
                 np.testing.assert_array_equal(np.asarray(view), expected)
@@ -104,16 +120,22 @@ class CalibrationTests(unittest.TestCase):
             for view in rotation_calibrate.load_camera_images(path):
                 np.testing.assert_array_equal(np.asarray(view), expected)
 
-    def test_tilt_correction_expands_the_view_instead_of_cropping_corners(self):
+    def test_saved_rotation_calibrations_do_not_change_the_output(self):
         with tempfile.TemporaryDirectory() as directory:
-            profile = Path(directory) / "rotation.npz"
-            np.savez(profile, angles=[15.0])
-            view = Image.new("RGB", (100, 150), "white")
-            with patch.object(cfg, "ROTATION_CALIBRATION_PATH", profile):
-                corrected = apply_rotation_calibration([view])[0]
-            self.assertGreater(corrected.width, view.width)
-            self.assertGreater(corrected.height, view.height)
-            self.assertGreater(np.asarray(corrected, dtype=float).sum() / (3 * 255), 14800)
+            base = Path(directory)
+            profile = base / "rotation.npz"
+            np.savez(profile, angles=[90.0, 180.0, 270.0, 15.0])
+            pixels = np.random.default_rng(16).integers(0, 256, (96, 128, 3), dtype=np.uint8)
+            raw = Image.fromarray(np.tile(pixels, (2, 2, 1)))
+            raw_path = base / "quad.png"
+            raw.save(raw_path)
+            with patch.object(cfg, "WB_PROFILE_PATH", base / "absent-wb.npz"):
+                with patch.object(cfg, "ROTATION_CALIBRATION_PATH", base / "absent-rotation.npz"):
+                    run_pipeline(str(raw_path), str(base), "without_rotation_profile")
+                with patch.object(cfg, "ROTATION_CALIBRATION_PATH", profile):
+                    run_pipeline(str(raw_path), str(base), "with_rotation_profile")
+            self.assertEqual((base / "without_rotation_profile.gif").read_bytes(),
+                             (base / "with_rotation_profile.gif").read_bytes())
 
     def test_combining_profiles_does_not_reimport_the_previous_combined_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -140,7 +162,7 @@ class CalibrationTests(unittest.TestCase):
                 run_pipeline(str(image_path), str(base / "gifs"), "capture")
             with Image.open(base / "gifs" / "capture.gif") as gif:
                 self.assertEqual(gif.format, "GIF")
-                self.assertEqual(gif.size, (240, 135))
+                self.assertEqual(gif.size, (176, 99))
                 self.assertEqual(gif.width * 9, gif.height * 16)
                 gif.load()
 

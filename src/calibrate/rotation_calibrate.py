@@ -8,7 +8,7 @@ Flow:
   1. A fullscreen prompt asks you to press the physical shutter button (or SPACE)
      while a reference rectangle (e.g. a sheet of paper) is in frame.
   2. rpicam-still captures the composite image.
-  3. For each of the 4 camera quadrants (after the standard 90° pipeline rotation):
+  3. For each of the 4 unrotated camera quadrants:
        – Click TWO points on the SAME horizontal edge of the reference rectangle.
        – The angle of that line vs. horizontal is computed and a corrected preview shown.
        – Confirm or redo the clicks.
@@ -91,7 +91,7 @@ def split_grid(img: Image.Image, rows: int, cols: int):
 
 
 def load_camera_images(raw_path: Path):
-    """Load full camera views with exactly 90 degrees counterclockwise rotation."""
+    """Load full camera views in their original sensor orientation."""
     with Image.open(raw_path) as raw:
         return camera_views(raw.convert("RGB"))
 

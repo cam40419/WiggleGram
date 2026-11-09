@@ -30,7 +30,7 @@ class CameraSettingsTests(unittest.TestCase):
             "import camera_settings as s; import config as c; "
             "\nwith patch('shutil.which', side_effect=lambda name: name): "
             "print(json.dumps({'still': s.still_command(Path('test photo.jpg')), "
-            "'preview': s.viewfinder_command(), 'profiles': str(c.NPZ_DIR)}))",
+            "'preview': s.viewfinder_command(), 'profiles': str(c.NPZ_DIR), 'rotation': c.VIEW_ROTATION}))",
         ], env=env, text=True, capture_output=True)
 
     def test_uc873_defaults_preserve_four_view_resolution(self):
@@ -50,7 +50,8 @@ class CameraSettingsTests(unittest.TestCase):
         self.assertEqual(preview[preview.index("--autofocus-mode") + 1], "continuous")
         self.assertNotIn("--tuning-file", still)
         self.assertNotIn("--autofocus-on-capture", still)
-        self.assertEqual(Path(data["profiles"]), SRC / "calibrate" / "out" / "imx519")
+        self.assertEqual(data["rotation"], 0)
+        self.assertEqual(Path(data["profiles"]), SRC / "calibrate" / "out" / "imx519" / "rotation_0")
 
     def test_fixed_focus_and_camera_selection_reach_still_and_preview(self):
         result = self.configured_commands(
@@ -80,6 +81,15 @@ class CameraSettingsTests(unittest.TestCase):
                 })
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("full sensor aspect ratio", result.stderr)
+
+    def test_old_rotation_preferences_cannot_reenable_rotation(self):
+        for angle in ("90", "180", "270"):
+            with self.subTest(angle=angle):
+                result = self.configured_commands(WIGGLEGRAM_VIEW_ROTATION=angle)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data = json.loads(result.stdout)
+                self.assertEqual(data["rotation"], 0)
+                self.assertEqual(Path(data["profiles"]), SRC / "calibrate" / "out" / "imx519" / "rotation_0")
 
     def test_camera_command_selection_supports_both_os_families(self):
         for kind in ("still", "vid"):

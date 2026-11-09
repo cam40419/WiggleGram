@@ -8,7 +8,7 @@ from datetime import datetime
 
 import cv2
 import numpy as np
-from PIL import Image, ImageFile, ImageOps
+from PIL import Image, ImageFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config as cfg
@@ -53,7 +53,7 @@ def capture_image() -> Path:
 
 
 def split_and_rotate(raw: Image.Image) -> list[Image.Image]:
-    """Use the pipeline's full views with exactly 90 degrees CCW rotation."""
+    """Use the pipeline's full, unrotated sensor views."""
     return camera_views(raw)
 
 
@@ -116,7 +116,7 @@ def calibrate(image_path: Path | None = None):
 
     logger.info("Loading %s", image_path)
     raw = Image.open(image_path)
-    raw = ImageOps.exif_transpose(raw).convert("RGB")
+    raw = raw.convert("RGB")
     pieces = split_and_rotate(raw)
 
     all_maps: list[np.ndarray] = []

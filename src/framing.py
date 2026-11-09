@@ -45,22 +45,17 @@ def pad_to_aspect(image: Image.Image, aspect: Tuple[int, int] = (16, 9)) -> Imag
     return canvas
 
 
-def rotate_camera_view(image: Image.Image) -> Image.Image:
-    """Apply exactly 90 degrees counterclockwise to an individual camera view."""
-    return image.transpose(Image.Transpose.ROTATE_90)
-
-
 def preview_view(composite: Image.Image, camera_index: int = 1) -> Image.Image:
-    """Extract the complete upright view; preview must not enlarge the GIF crop."""
+    """Extract the complete camera view in its original sensor orientation."""
     if not 0 <= camera_index < 4:
         raise ValueError("Camera index must be between 0 and 3")
     width, height = composite.width // 2, composite.height // 2
     row, column = divmod(camera_index, 2)
     view = composite.crop((column * width, row * height,
                            (column + 1) * width, (row + 1) * height))
-    return rotate_camera_view(view)
+    return view
 
 
 def camera_views(composite: Image.Image) -> list:
-    """Return all four full views, in camera order, rotated 90 degrees CCW."""
+    """Return all four full views without rotating or flipping any pixels."""
     return [preview_view(composite, camera) for camera in range(4)]

@@ -11,8 +11,12 @@ ENV_VARS = dict(os.environ)
 # Static config variables
 ROOT_DIR = Path(ENV_VARS.get("WIGGLEGRAM_ROOT_DIR", Path(__file__).resolve().parent))
 
-# The old sensors' calibration must not be applied to the replacement modules.
-NPZ_DIR = Path(ENV_VARS.get("WIGGLEGRAM_CALIBRATION_DIR", ROOT_DIR / "calibrate" / "out" / "imx519"))
+# Retain native sensor orientation. Ignore old rotation values in existing .env files.
+VIEW_ROTATION = 0
+
+# The previous 90-degree spatial maps must not be applied to unrotated views.
+_profile_dir = ROOT_DIR / "calibrate" / "out" / "imx519" / "rotation_0"
+NPZ_DIR = Path(ENV_VARS.get("WIGGLEGRAM_CALIBRATION_DIR", _profile_dir))
 COLOR_PROFILE_PATH = NPZ_DIR / "color_profile.npz"
 WB_PROFILE_PATH = NPZ_DIR / "white_balance_profile.npz"
 ROTATION_CALIBRATION_PATH = NPZ_DIR / "rotation_calibration.npz"

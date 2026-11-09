@@ -38,12 +38,12 @@ class FramingTests(unittest.TestCase):
         self.assertEqual(framed.getpixel((0, 0)), (0, 0, 0))
 
     def test_full_resolution_padding_does_not_discard_sensor_rows(self):
-        view = Image.new("RGB", (1748, 2328), "white")
+        view = Image.new("RGB", (2328, 1748), "white")
         framed = pad_to_aspect(view)
-        self.assertEqual(framed.size, (4144, 2331))
-        self.assertEqual(framed.crop((1198, 1, 2946, 2329)).tobytes(), view.tobytes())
+        self.assertEqual(framed.size, (3120, 1755))
+        self.assertEqual(framed.crop((396, 3, 2724, 1751)).tobytes(), view.tobytes())
 
-    def test_preview_preserves_the_full_upright_field_of_view(self):
+    def test_preview_preserves_every_pixel_in_native_sensor_orientation(self):
         raw = Image.new("RGB", (256, 192))
         for camera in range(4):
             pixels = np.zeros((96, 128, 3), dtype=np.uint8)
@@ -55,9 +55,12 @@ class FramingTests(unittest.TestCase):
         for camera in range(4):
             with self.subTest(camera=camera):
                 view = preview_view(raw, camera)
-                self.assertEqual(view.size, (96, 128))
-                self.assertEqual(view.getpixel((0, 0)), (127, 0, camera * 50))
-                self.assertEqual(view.getpixel((95, 127)), (0, 95, camera * 50))
+                self.assertEqual(view.size, (128, 96))
+                self.assertEqual(view.getpixel((0, 0)), (0, 0, camera * 50))
+                self.assertEqual(view.getpixel((127, 95)), (127, 95, camera * 50))
+                row, column = divmod(camera, 2)
+                expected = np.asarray(raw)[row * 96:(row + 1) * 96, column * 128:(column + 1) * 128]
+                np.testing.assert_array_equal(np.asarray(view), expected)
                 self.assertEqual(camera_views(raw)[camera].tobytes(), view.tobytes())
 
     def test_alignment_expands_to_preserve_all_edges_at_original_pixel_scale(self):

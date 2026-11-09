@@ -19,7 +19,6 @@ from PIL import Image
 import config as cfg
 from framing import camera_views
 from pipeline import (
-    apply_rotation_calibration,
     apply_white_balance,
     apply_color_correction,
     pick_anchors_template,
@@ -64,18 +63,16 @@ def process_image(image_path: Path, output_dir: Path):
         raw = Image.open(image_path).convert("RGB")
         logger.debug(f"Loaded image: {raw.size}")
         
-        # Split into full views and rotate each exactly 90 degrees CCW.
+        # Split into full views in their original sensor orientation.
         pieces = camera_views(raw)
         logger.debug(f"Split into {len(pieces)} pieces")
         
         # Apply calibrations if available
         pieces = apply_white_balance(pieces)
-        pieces = apply_rotation_calibration(pieces)
         # Optionally enable color correction
         pieces = apply_color_correction(pieces)
         
-        # Expanded rotation corrections can have different sizes. Alignment
-        # retains those pixels on a shared canvas instead of rescaling them.
+        # Alignment retains all pixels on a shared canvas without rescaling.
         base_w, base_h = pieces[0].size
         
         # Pick anchor points for alignment

@@ -31,6 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info(f"Logging to {LOG_FILE}")
+logger.info("Camera views retain native sensor orientation; rotation is disabled")
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -158,10 +159,10 @@ class WiggleApp:
         elif self.state == self.STATE_GIF:
             self._return_to_viewfinder()
 
-    # Show the complete camera view, rotated 90 degrees counterclockwise.
+    # Show the complete camera view in its original sensor orientation.
     @staticmethod
     def _extract_cam1(frame: Image.Image) -> Image.Image:
-        """Extract the full top-right view and rotate 90° CCW."""
+        """Extract the full, unrotated top-right camera view."""
         return preview_view(frame)
 
     # Viewfinder poll (runs every 33 ms on tkinter main thread)
@@ -235,13 +236,13 @@ class WiggleApp:
     # Build 4-up composite from raw 2×2 capture
     @staticmethod
     def _build_4up(raw: Image.Image, target_w: int, target_h: int) -> Image.Image:
-        """Show all four complete, counterclockwise-rotated camera views."""
-        rotated = camera_views(raw)
+        """Show all four complete camera views without rotation."""
+        views = camera_views(raw)
         # Lay the framed views side by side.
         cell_w = target_w // 4
         cell_h = target_h
         composite = Image.new("RGB", (target_w, target_h), (0, 0, 0))
-        for i, piece in enumerate(rotated):
+        for i, piece in enumerate(views):
             piece.thumbnail((cell_w, cell_h), Image.Resampling.LANCZOS)
             pw2, ph2 = piece.size
             x = i * cell_w + (cell_w - pw2) // 2

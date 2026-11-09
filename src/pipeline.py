@@ -26,30 +26,6 @@ def split_grid(img: Image.Image, rows: int, cols: int) -> List[Image.Image]:
     return pieces
 
 
-def apply_rotation_calibration(images: List[Image.Image]) -> List[Image.Image]:
-    """Rotate each camera image by the CCW angle stored in rotation_calibration.npz."""
-    
-    calib_path = cfg.ROTATION_CALIBRATION_PATH
-    
-    if not calib_path.exists():
-        logger.debug("Rotation calibration not found: %s (skipping)", calib_path)
-        return images
-    data   = np.load(str(calib_path))
-    angles = data["angles"].astype(float)
-    corrected: List[Image.Image] = []
-    for idx, im in enumerate(images):
-        if idx >= len(angles) or abs(angles[idx]) < 1e-4:
-            corrected.append(im)
-        else:
-            corrected.append(im.rotate(
-                float(angles[idx]),
-                resample=Image.Resampling.BICUBIC,
-                expand=True,
-            ))
-            logger.info("Rotation calibration applied to camera %d: %.4f°", idx, angles[idx])
-    return corrected
-
-
 def apply_color_correction(images: List[Image.Image]) -> List[Image.Image]:
     """Apply color correction using color calibration profile."""
     profile_path = cfg.COLOR_PROFILE_PATH
@@ -284,7 +260,6 @@ def run_pipeline(raw_path: str, save_path: str, timestamp: str):
     with Image.open(raw_path) as raw:
         pieces = camera_views(raw)
     pieces = apply_white_balance(pieces)
-    pieces = apply_rotation_calibration(pieces)
     # pieces = apply_color_correction(pieces)
 
     w, h      = pieces[0].size

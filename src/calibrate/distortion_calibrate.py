@@ -33,8 +33,8 @@ def split_grid(image, rows: int, cols: int):
 
 
 def rotate_piece_for_camera(piece, cam_idx: int):
-    """Every camera uses the same 90-degree counterclockwise mounting."""
-    return cv2.rotate(piece, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    """Keep the original sensor orientation for every camera."""
+    return piece.copy()
 
 
 def capture_and_prepare_sets(
