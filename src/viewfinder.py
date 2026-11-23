@@ -3,6 +3,7 @@ import logging
 import queue
 import subprocess
 import threading
+from collections import deque
 from typing import Optional
 
 from PIL import Image
@@ -30,8 +31,28 @@ class MJPEGReader(threading.Thread):
         self._proc: Optional[subprocess.Popen] = None
         self._stop_event = threading.Event()
         self._proc_lock = threading.Lock()
+        self.error: Optional[str] = None
+        self._stderr_tail = deque(maxlen=30)
+
+    def _read_stderr(self):
+        # Drain stderr separately: stdout contains binary JPEGs, and an unread
+        # stderr pipe can block the camera process even while frames are flowing.
+        for line in self._proc.stderr:
+            message = line.decode("utf-8", errors="replace").rstrip()
+            self._stderr_tail.append(message)
+            logger.info("Camera: %s", message)
+
+    def _failure_message(self) -> str:
+        output = "\n".join(self._stderr_tail).lower()
+        if "no cameras available" in output:
+            return "No cameras available. Run: python3 scripts/setup_imx519.py --check"
+        if "failed to acquire camera" in output or "device or resource busy" in output:
+            return "Camera is busy. Close other camera apps and restart WiggleGram."
+        return "Camera preview failed. See wigglegram.log for details."
 
     def run(self):
+        stderr_reader = None
+        failed = False
         try:
             cmd = viewfinder_command(camera=self.camera, width=self.width,
                                      height=self.height, fps=self.fps)
@@ -39,14 +60,26 @@ class MJPEGReader(threading.Thread):
             with self._proc_lock:
                 if self._stop_event.is_set():
                     return
-                self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+                self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                              stderr=subprocess.PIPE)
+            stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+            stderr_reader.start()
             self._read_frames()
+            failed = not self._stop_event.is_set()
         except Exception:
+            failed = True
             logger.exception("Viewfinder failed; check the IMX519 driver and camera configuration")
         finally:
             self._stop_process()
             if self._proc is not None and self._proc.stdout is not None:
                 self._proc.stdout.close()
+            if stderr_reader is not None:
+                stderr_reader.join(timeout=3)
+                if not stderr_reader.is_alive():
+                    self._proc.stderr.close()
+            if failed and not self._stop_event.is_set():
+                self.error = self._failure_message()
+                logger.error("%s", self.error)
 
     def _read_frames(self):
         buf = b""

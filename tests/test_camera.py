@@ -6,6 +6,7 @@ import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import ExitStack
 from unittest.mock import Mock, patch
@@ -156,7 +157,7 @@ class ViewfinderTests(unittest.TestCase):
         for color in ("red", "blue"):
             Image.new("RGB", (24, 16), color).save(stream, format="JPEG")
         stream.seek(0)
-        proc = Mock(stdout=stream, returncode=None)
+        proc = Mock(stdout=stream, stderr=io.BytesIO(), returncode=None)
         proc.poll.side_effect = lambda: proc.returncode
         proc.terminate.side_effect = lambda: setattr(proc, "returncode", 0)
         frames = queue.Queue(maxsize=2)
@@ -172,6 +173,58 @@ class ViewfinderTests(unittest.TestCase):
         self.assertEqual(image.size, (24, 16))
         self.assertGreater(image.getpixel((0, 0))[2], 240)
         proc.terminate.assert_called_once()
+
+    def test_detection_error_reaches_log_and_ui_even_when_stderr_exceeds_pipe_capacity(self):
+        # Use a real child process so stderr must drain alongside the JPEG pipe.
+        command = [sys.executable, "-c",
+                   "import sys; sys.stderr.write(('driver diagnostic ' * 100 + '\\n') * 100); "
+                   "sys.stderr.write('ERROR: *** no cameras available ***\\n'); sys.exit(1)"]
+        reader = MJPEGReader(queue.Queue())
+        with patch("viewfinder.viewfinder_command", return_value=command), \
+                self.assertLogs("viewfinder", level="INFO") as logs:
+            reader.start()
+            reader.join(timeout=10)
+            reader.stop()
+        self.assertFalse(reader.is_alive())
+        self.assertIn("No cameras available", reader.error)
+        self.assertIn("setup_imx519.py --check", reader.error)
+        self.assertIn("ERROR: *** no cameras available ***", "\n".join(logs.output))
+        self.assertTrue(reader._proc.stderr.closed)
+
+    def test_intentionally_stopping_the_preview_does_not_report_a_camera_failure(self):
+        command = [sys.executable, "-c", "import time; time.sleep(30)"]
+        reader = MJPEGReader(queue.Queue())
+        started = threading.Event()
+        original_read = reader._read_frames
+
+        def read():
+            started.set()
+            original_read()
+
+        with patch("viewfinder.viewfinder_command", return_value=command), \
+                patch.object(reader, "_read_frames", side_effect=read):
+            reader.start()
+            self.assertTrue(started.wait(timeout=5))
+            reader.stop()
+        self.assertFalse(reader.is_alive())
+        self.assertIsNone(reader.error)
+
+    def test_startup_failure_is_visible_in_the_app(self):
+        with patch.dict(sys.modules, {"RPi": None}), \
+                patch("logging.FileHandler"):
+            import app as app_module
+        app = app_module.WiggleApp.__new__(app_module.WiggleApp)
+        app.state = app.STATE_VIEWFINDER
+        app._frame_queue = queue.Queue()
+        app._mjpeg = Mock(error="No cameras available. Run: python3 scripts/setup_imx519.py --check")
+        app.status_var = Mock()
+        app.status_var.get.return_value = "Ready"
+        app._bar_frame, app.root = Mock(), Mock()
+        app.screen_w, app.screen_h, app._bar_height = 800, 480, 34
+        app._poll_viewfinder()
+        app.status_var.set.assert_called_once_with(app._mjpeg.error)
+        app._bar_frame.place.assert_called_once()
+        app.root.after.assert_called_once()
 
     def test_stopped_reader_cannot_start_a_new_camera_process(self):
         reader = MJPEGReader(queue.Queue())

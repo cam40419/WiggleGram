@@ -204,11 +204,42 @@ class SetupFlowTests(unittest.TestCase):
                                  ("No cameras available!\n", 1)):
             with self.subTest(output=output), \
                     patch.object(setup, "camera_executable", return_value="rpicam-still"), \
+                    patch.object(setup, "camera_diagnostics") as diagnostics, \
                     patch.object(setup.subprocess, "run", return_value=Mock(returncode=0, stdout=output)) as run:
                 self.assertEqual(setup.main(["--check"]), expected)
                 self.assertEqual(run.call_args.args[0], ["rpicam-still", "--list-cameras"])
+                self.assertEqual(run.call_args_list[0].args[0], ["rpicam-still", "--version"])
+                self.assertEqual(diagnostics.call_count, expected)
         self.install.assert_not_called()
         self.assertEqual(self.config.read_text(), self.original)
+
+    def test_failed_check_collects_boot_and_kernel_evidence_without_changing_the_pi(self):
+        self.config.write_text("[all]\ncamera_auto_detect=0\ndtoverlay=imx519\n")
+        with patch.object(setup, "camera_executable", return_value="rpicam-still"), \
+                patch.object(setup.subprocess, "run", side_effect=[
+                    Mock(returncode=0, stdout="rpicam-apps test build\nlibcamera test version\n"),
+                    Mock(returncode=0, stdout="No cameras available!\n"),
+                    Mock(returncode=0, stdout="[0.1] imx519 10-001a: failed to read chip id\n"),
+                ]):
+            self.assertEqual(setup.main(["--check"]), 1)
+        output = self.stdout.getvalue()
+        self.assertIn("rpicam-apps test build", output)
+        self.assertIn("dtoverlay=imx519", output)
+        self.assertIn("IMX519 overlay file: present", output)
+        self.assertIn("failed to read chip id", output)
+        self.install.assert_not_called()
+        self.assertEqual(list(self.boot.glob("*.bak")), [])
+
+    def test_restricted_kernel_log_does_not_hide_the_detection_failure(self):
+        with patch.object(setup, "camera_executable", return_value="rpicam-still"), \
+                patch.object(setup.subprocess, "run", side_effect=[
+                    Mock(returncode=0, stdout="rpicam version\n"),
+                    Mock(returncode=0, stdout="No cameras available!\n"),
+                    Mock(returncode=1, stdout="dmesg: read kernel buffer failed: Operation not permitted\n"),
+                ]):
+            self.assertEqual(setup.main(["--check"]), 1)
+        self.assertIn("rerun this check with sudo", self.stdout.getvalue())
+        self.assertIn("IMX519 is not available", self.stderr.getvalue())
 
 
 class VendorInstallTests(unittest.TestCase):

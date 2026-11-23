@@ -195,16 +195,78 @@ def camera_executable(kind: str) -> str:
     raise SetupError(f"No rpicam-{kind} or libcamera-{kind} command found after installation.")
 
 
-def check_cameras() -> None:
-    executable = camera_executable("still")
-    result = subprocess.run([executable, "--list-cameras"], text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+def camera_diagnostics(config: Path) -> None:
+    """Print read-only evidence to distinguish boot/driver and userspace failures."""
+    print("\n--- Camera detection diagnostics ---", flush=True)
+    print(f"Kernel: {platform.release()}")
+    print(f"Boot config: {config}")
+    try:
+        for path, text in read_boot_configs(config).items():
+            print(f"Camera settings in {path} (sections shown as written):")
+            for line in text.splitlines():
+                if line.strip().startswith("[") or CAMERA_SETTING.match(line) or re.match(
+                        r"^\s*(?:start_x|legacy_camera)\s*=", line):
+                    print("  " + line)
+    except (OSError, SetupError) as exc:
+        print(f"Cannot read boot settings: {exc}")
+    overlay = config.parent / "overlays" / "imx519.dtbo"
+    print(f"IMX519 overlay file: {'present' if overlay.is_file() else 'MISSING'} ({overlay})")
+
+    print("Kernel camera I2C devices:")
+    found = False
+    for name_file in sorted(Path("/sys/bus/i2c/devices").glob("*/name")):
+        try:
+            name = name_file.read_text().strip()
+            if not re.search(r"imx\d+|ov\d+|arducam|ak7375", name, re.IGNORECASE):
+                continue
+            found = True
+            driver = name_file.parent / "driver"
+            bound = driver.resolve().name if driver.exists() else "NOT BOUND"
+            print(f"  {name_file.parent.name}: {name}, driver: {bound}")
+        except OSError as exc:
+            print(f"  Cannot read {name_file}: {exc}")
+    if not found:
+        print("  No camera sensor devices found.")
+
+    print("Camera kernel messages:")
+    try:
+        result = subprocess.run(["dmesg", "--color=never"], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+        if result.returncode:
+            print("  Cannot read kernel log; rerun this check with sudo.")
+        else:
+            lines = [line for line in result.stdout.splitlines()
+                     if re.search(r"imx519|imx219|arducam|unicam|ak7375", line, re.IGNORECASE)]
+            for line in lines[-40:]:
+                print("  " + line)
+            if not lines:
+                print("  No matching messages in the current kernel log.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  Cannot read kernel log: {exc}")
+
+
+def check_cameras(config: Path) -> None:
+    try:
+        executable = camera_executable("still")
+        print(f"Camera command: {executable}", flush=True)
+        version = subprocess.run([executable, "--version"], text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        print(version.stdout, end="" if version.stdout.endswith("\n") else "\n")
+        result = subprocess.run([executable, "--list-cameras"], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    except (SetupError, OSError, subprocess.SubprocessError):
+        camera_diagnostics(config)
+        raise
     print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     if result.returncode or not re.search(r"(?im)^\s*\d+\s*:\s*imx519\b", result.stdout):
+        camera_diagnostics(config)
         raise SetupError(
-            "IMX519 is not available. Reboot after setup, stop the camera app, "
-            "and check the HAT/ribbons with power disconnected. Diagnostics:\n"
-            "  sudo dmesg | grep -Ei 'imx519|arducam|unicam|ak7375'"
+            "IMX519 is not available to the camera stack. Stop WiggleGram and other camera apps. "
+            "If boot settings are missing or incorrect, run:\n"
+            "  sudo python3 scripts/setup_imx519.py --config-only\n"
+            "  sudo reboot\n"
+            "If detection still fails, share the diagnostics above before reinstalling packages. "
+            "Power off the Pi before checking the HAT and camera ribbons."
         )
     print("IMX519 detected. The UC-512's four views appear as one camera device.")
 
@@ -219,10 +281,10 @@ def main(argv=None) -> int:
         parser.error("--check cannot be combined with --config-only or --dry-run")
     try:
         codename = check_platform()
-        if args.check:
-            check_cameras()
-            return 0
         config = boot_config_path(codename)
+        if args.check:
+            check_cameras(config)
+            return 0
         updates = config_updates(config)
         print(f"Boot config: {config}", flush=True)
         for path, (before, after) in updates.items():
@@ -254,8 +316,9 @@ def main(argv=None) -> int:
         print("After reboot, verify detection:\n  python3 scripts/setup_imx519.py --check")
         return 0
     except (SetupError, OSError, ValueError, subprocess.SubprocessError) as exc:
-        print(f"Setup failed: {exc}", file=sys.stderr)
-        print("Fix the reported error and rerun. Boot-config backups have a .wigglegram-*.bak suffix.", file=sys.stderr)
+        print(f"{'Check' if args.check else 'Setup'} failed: {exc}", file=sys.stderr)
+        if not args.check:
+            print("Fix the reported error and rerun. Boot-config backups have a .wigglegram-*.bak suffix.", file=sys.stderr)
         return 1
 
 

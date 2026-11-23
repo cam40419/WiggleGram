@@ -85,6 +85,35 @@ using the CamArray guide if the image shows one or two views. A missing
 `imx519.dtbo` overlay means the Pi's kernel/firmware must be updated before this
 setup can complete; the script reports that instead of claiming success.
 
+### Startup says "no cameras available"
+
+Close WiggleGram (and stop its service if one is running), then run from the
+repository folder on the Pi:
+
+```sh
+sudo python3 scripts/setup_imx519.py --check 2>&1 | tee camera-check.log
+```
+
+The check makes no changes. On failure it prints the camera-stack version,
+boot camera settings, overlay availability, kernel sensor bindings, and camera
+kernel messages. Share `camera-check.log` to distinguish a missing overlay,
+sensor connection failure, or camera-stack mismatch. A standalone detection
+failure needs to be resolved before changing capture resolution or orientation.
+The app also saves the preview process's error output in `wigglegram.log` and
+shows startup failures in the status bar.
+
+If the report shows missing or old camera boot settings, reapply them and reboot:
+
+```sh
+sudo python3 scripts/setup_imx519.py --config-only
+sudo reboot
+```
+
+These are the `dtoverlay=imx519` settings required by the CamArray guide above.
+If detection still fails after reboot, fully shut down and disconnect power
+before reseating the Pi-to-HAT cable and camera ribbons. Keep the diagnostic
+report before reinstalling or changing the camera packages.
+
 ## Install and run
 
 From the repository root on the Pi:

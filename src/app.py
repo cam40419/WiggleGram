@@ -174,7 +174,13 @@ class WiggleApp:
                 self._last_vf_frame = cam1
                 self._show_pil(cam1, overlays=True)
             except queue.Empty:
-                pass  # no new frame yet
+                error = self._mjpeg.error
+                if error and self.status_var.get() != error:
+                    self.status_var.set(error)
+                    self._bar_frame.place(
+                        x=0, y=self.screen_h - self._bar_height,
+                        width=self.screen_w, height=self._bar_height,
+                    )
         self.root.after(33, self._poll_viewfinder)
 
     def _draw_all_overlays(self, img: Image.Image) -> Image.Image:
