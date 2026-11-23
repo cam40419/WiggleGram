@@ -33,6 +33,13 @@ display scaling, so changing stream resolution does not enlarge the UI.
 
 ## Set up the Pi 4B
 
+For a fresh Pi installation, follow the [manual camera setup guide](docs/camera-setup.md),
+which covers the official driver source, boot settings, quad mode, and troubleshooting.
+After setup, `python3 scripts/capture_quad.py -o quad-test.jpg` takes one full
+four-view JPEG without installing the app's Python dependencies or starting its UI.
+
+The automated setup alternative is below.
+
 Close the app and stop any running WiggleGram service, then run from the
 repository root **on the Pi**:
 
